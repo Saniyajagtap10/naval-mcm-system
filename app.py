@@ -168,18 +168,15 @@ transform = transforms.Compose([
 
 classes = ["Mine_Ordnance", "Safe_Seabed"]
 
-# Generate real-time synthetic sonar image if dataset folder lacks variety
+# Generate real-time synthetic sonar image dynamically
 def generate_realtime_sonar_scan(seed_val):
     np.random.seed(seed_val)
-    # Base seabed texture with Perlin-like noise
     base = np.random.normal(120, 30, (224, 224)).astype(np.uint8)
     base = cv2.GaussianBlur(base, (15, 15), 0)
     
-    # Add random geological ripples
     for i in range(0, 224, 20):
         cv2.line(base, (0, i), (224, i + np.random.randint(-10, 10)), (80, 80, 80), 1)
 
-    # 40% chance to embed a mine object target in real-time
     is_threat = (seed_val % 3 == 0) or (seed_val % 5 == 0)
     if is_threat:
         center_x = np.random.randint(60, 164)
@@ -309,7 +306,6 @@ if nav_choice == "🗺️ Multi-AUV Swarm GIS Map & Telemetry":
                 wp = pts[step]
                 current_active[auv_name] = wp
 
-                # Generate live dynamic result per waypoint
                 _, pred_label, conf = generate_realtime_sonar_scan(wp["seed"] + int(time.time() % 10))
                 conf = max(40.0, conf - (turbidity * 0.8))
 
@@ -404,7 +400,6 @@ elif nav_choice == "📡 Target Acoustic Scan & Threat Action":
         waterfall_img = cv2.applyColorMap(resized_wf, cv2.COLORMAP_OCEAN)
         st.image(waterfall_img, channels="BGR", use_container_width=True)
 
-    # AUDIO PINGER SIMULATOR
     st.markdown("---")
     st.subheader("🔊 Hydrophone Acoustic Ping Simulator")
     is_mine_threat = (prediction == "Mine_Ordnance" and conf > 70.0)
@@ -436,7 +431,6 @@ elif nav_choice == "📡 Target Acoustic Scan & Threat Action":
     """
     components.html(audio_html, height=85)
 
-    # FFT Spectrum Graph
     st.markdown("---")
     st.subheader("🎵 Acoustic Frequency Spectrum (Dynamic FFT Analysis)")
     f_transform = np.fft.fft2(gray_img)
@@ -459,7 +453,6 @@ elif nav_choice == "📡 Target Acoustic Scan & Threat Action":
     )
     st.plotly_chart(fig_fft, use_container_width=True)
 
-    # Diagnostics & Threat Actions
     st.markdown("---")
     st.subheader("📊 Diagnostics & Dynamic Threat Warnings")
     k1, k2, k3, k4 = st.columns(4)
