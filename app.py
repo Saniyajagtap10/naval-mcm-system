@@ -28,20 +28,17 @@ st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@600;800&family=Rajdhani:wght@600;700&display=swap');
     
-    /* Global Dark Background */
     .stApp, .stAppContainer, [data-testid="stSidebar"], section[data-testid="stSidebar"] {
         background-color: #080D1A !important;
         color: #FFFFFF !important;
         font-family: 'Rajdhani', sans-serif !important;
     }
     
-    /* Crystal Clear White Text for Everything */
     p, span, label, div, .stMarkdown, .stText, .streamlit-expanderHeader, span[data-baseweb="tag"] {
         color: #FFFFFF !important;
         font-size: 16px !important;
     }
 
-    /* Titles & Headers */
     h1, h2, h3 {
         font-family: 'Orbitron', sans-serif !important;
         color: #00F5D4 !important;
@@ -53,7 +50,6 @@ st.markdown("""
         font-family: 'Orbitron', sans-serif !important;
     }
 
-    /* Metric Cards Styling */
     div[data-testid="stMetricValue"] {
         font-family: 'Orbitron', sans-serif !important;
         color: #00F5D4 !important;
@@ -75,14 +71,12 @@ st.markdown("""
         padding: 10px !important;
     }
 
-    /* Input & Selectbox Dropdowns */
     .stSelectbox div[data-baseweb="select"] > div, .stTextInput input, .stNumberInput input {
         background-color: #0F172A !important;
         color: #FFFFFF !important;
         border-color: #475569 !important;
     }
 
-    /* Alert / Status Boxes */
     .hazard-box {
         background-color: rgba(239, 68, 68, 0.2);
         border: 2px solid #EF4444;
@@ -191,10 +185,10 @@ if "mission_records" not in st.session_state:
     st.session_state.mission_records = []
 
 # ==========================================
-# 3. SIDEBAR NAVIGATION
+# 3. SIDEBAR NAVIGATION & ENVIRONMENTAL CONTROLS
 # ==========================================
 st.sidebar.markdown("# ⚓ NAVAL MCM COMMAND")
-st.sidebar.markdown("**Real-Time Subsea Operations**")
+st.sidebar.markdown("**Real-Time Multi-AUV Operations**")
 
 if model_loaded:
     st.sidebar.success("✅ PyTorch AI Engine Active")
@@ -202,10 +196,14 @@ else:
     st.sidebar.warning("⚠️ Baseline Engine Active")
 
 st.sidebar.markdown("---")
-st.sidebar.markdown("### 🌊 Ocean Environment")
-st.sidebar.text("• Sea State: Smooth (2)")
+st.sidebar.markdown("### 🎛️ Live Environmental Controls")
+turbidity = st.sidebar.slider("Water Turbidity (NTU):", 0.5, 15.0, 2.3, 0.1)
+current_speed = st.sidebar.slider("Current Velocity (Knots):", 0.0, 5.0, 1.2, 0.1)
+
+st.sidebar.markdown("---")
+st.sidebar.text(f"• Sea State: {int(current_speed*1.5)} (Moderate)")
 st.sidebar.text("• Salinity: 34.8 PSU")
-st.sidebar.text("• Water Temp: 24.2 °C")
+st.sidebar.text(f"• Water Temp: {24.2 - (turbidity*0.05):.1f} °C")
 
 st.sidebar.markdown("---")
 st.sidebar.markdown(f"📂 **Dataset Files:** {len(real_dataset_files)} available")
@@ -214,58 +212,64 @@ st.sidebar.markdown("---")
 nav_choice = st.sidebar.radio(
     "Select Tactical Command View:",
     [
-        "🗺️ Real-Time AUV GIS Map & Telemetry",
+        "🗺️ Multi-AUV Swarm GIS Map & Telemetry",
         "📡 Target Acoustic Scan & Threat Action",
         "🏔️ 3D Bathymetry Seabed Terrain",
         "📦 Bulk Batch Processing Engine",
-        "📊 Executive Audit Trail & Export"
+        "📊 Executive Audit Trail & Report"
     ]
 )
 
 # ==========================================
-# VIEW 1: LIVE GIS MAP & TELEMETRY + RTH
+# VIEW 1: MULTI-AUV SWARM GIS MAP & TELEMETRY
 # ==========================================
-if nav_choice == "🗺️ Real-Time AUV GIS Map & Telemetry":
-    st.title("🗺️ Real-Time AUV GIS Ocean Mapping & Telemetry")
-    st.write("Autonomous subsea survey with real-time hardware telemetry and emergency controls.")
+if nav_choice == "🗺️ Multi-AUV Swarm GIS Map & Telemetry":
+    st.title("🗺️ Multi-AUV Swarm GIS Ocean Mapping & Telemetry")
+    st.write("Autonomous multi-agent subsea survey (Alpha, Bravo, Charlie) with live hardware telemetry.")
 
     base_lat, base_lon = 18.9100, 72.8200
 
     c_m1, c_m2, c_m3, c_m4 = st.columns(4)
     with c_m1:
-        num_targets = st.slider("Waypoints:", 3, min(20, max(3, len(real_dataset_files) if len(real_dataset_files)>0 else 5)), 6)
+        num_targets = st.slider("Waypoints per AUV:", 3, 10, 5)
     with c_m2:
         sim_delay = st.slider("Delay (sec):", 0.1, 1.0, 0.3)
     with c_m3:
-        btn_start = st.button("▶️ Launch Mission", type="primary")
+        btn_start = st.button("▶️ Launch Swarm Mission", type="primary")
     with c_m4:
         btn_rth = st.button("🚨 EMERGENCY RTH", type="secondary")
 
-    waypoints = []
-    for i in range(num_targets):
-        lat = base_lat + (i * 0.0022) + (np.sin(i) * 0.0005)
-        lon = base_lon + (i * 0.0028) + (np.cos(i) * 0.0003)
-        img_f = real_dataset_files[i % len(real_dataset_files)] if len(real_dataset_files) > 0 else None
-        waypoints.append({"id": i+1, "lat": lat, "lon": lon, "img": img_f})
+    # Generate Swarm Routes
+    auv_routes = {
+        "AUV-Alpha": [{"id": i+1, "lat": base_lat + (i * 0.002), "lon": base_lon + (i * 0.0025), "img": real_dataset_files[i % len(real_dataset_files)] if real_dataset_files else None} for i in range(num_targets)],
+        "AUV-Bravo": [{"id": i+1, "lat": base_lat + 0.003 + (i * 0.0018), "lon": base_lon - 0.002 + (i * 0.0022), "img": real_dataset_files[(i+2) % len(real_dataset_files)] if real_dataset_files else None} for i in range(num_targets)],
+        "AUV-Charlie": [{"id": i+1, "lat": base_lat - 0.003 + (i * 0.0022), "lon": base_lon + 0.003 + (i * 0.0015), "img": real_dataset_files[(i+4) % len(real_dataset_files)] if real_dataset_files else None} for i in range(num_targets)]
+    }
 
-    def render_map(history, current=None):
-        m = folium.Map(location=[base_lat + 0.008, base_lon + 0.008], zoom_start=13, tiles="OpenStreetMap")
-        path_pts = [[w["lat"], w["lon"]] for w in waypoints]
-        folium.PolyLine(path_pts, color="#00F5D4", weight=3, opacity=0.8).add_to(m)
+    def render_swarm_map(history_dict, current_dict=None):
+        m = folium.Map(location=[base_lat, base_lon + 0.002], zoom_start=13, tiles="OpenStreetMap")
+        colors = {"AUV-Alpha": "blue", "AUV-Bravo": "purple", "AUV-Charlie": "orange"}
+        
+        for auv_name, pts in auv_routes.items():
+            path_pts = [[w["lat"], w["lon"]] for w in pts]
+            folium.PolyLine(path_pts, color=colors[auv_name], weight=2.5, opacity=0.7, tooltip=auv_name).add_to(m)
 
-        for h in history:
-            color = "red" if h["pred"] == "Mine_Ordnance" else "green"
-            pop = f"Waypoint #{h['id']}<br>Status: {h['pred']}<br>Conf: {h['conf']:.1f}%"
-            folium.Marker(location=[h["lat"], h["lon"]], popup=pop, icon=folium.Icon(color=color, icon="info-sign")).add_to(m)
+        for auv_name, hist_list in history_dict.items():
+            for h in hist_list:
+                col = "red" if h["pred"] == "Mine_Ordnance" else "green"
+                pop = f"<b>{auv_name}</b> - WP #{h['id']}<br>Status: {h['pred']}<br>Conf: {h['conf']:.1f}%"
+                folium.Marker(location=[h["lat"], h["lon"]], popup=pop, icon=folium.Icon(color=col, icon="info-sign")).add_to(m)
 
-        if current:
-            folium.CircleMarker(location=[current["lat"], current["lon"]], radius=10, color="cyan", fill=True, fill_color="cyan", fill_opacity=1.0).add_to(m)
+        if current_dict:
+            for auv_name, cur in current_dict.items():
+                if cur:
+                    folium.CircleMarker(location=[cur["lat"], cur["lon"]], radius=8, color=colors[auv_name], fill=True, fill_color=colors[auv_name], fill_opacity=1.0, tooltip=f"Active: {auv_name}").add_to(m)
         return m
 
     col_t1, col_t2, col_t3, col_t4, col_t5 = st.columns(5)
     m_lat = col_t1.empty()
     m_lon = col_t2.empty()
-    m_batt = col_t3.empty()
+    m_batt = col_t2.empty()
     m_depth = col_t4.empty()
     m_stat = col_t5.empty()
 
@@ -273,136 +277,118 @@ if nav_choice == "🗺️ Real-Time AUV GIS Map & Telemetry":
     map_slot = col_map.empty()
     graph_slot = col_graph.empty()
 
-    if "is_running" not in st.session_state:
-        st.session_state.is_running = False
-    if "current_step" not in st.session_state:
-        st.session_state.current_step = 0
-    if "live_history" not in st.session_state:
-        st.session_state.live_history = []
+    if "swarm_running" not in st.session_state:
+        st.session_state.swarm_running = False
+    if "swarm_step" not in st.session_state:
+        st.session_state.swarm_step = 0
+    if "swarm_history" not in st.session_state:
+        st.session_state.swarm_history = {"AUV-Alpha": [], "AUV-Bravo": [], "AUV-Charlie": []}
     if "telemetry_logs" not in st.session_state:
         st.session_state.telemetry_logs = []
 
     if btn_rth:
-        st.session_state.is_running = False
-        st.error("🚨 EMERGENCY RETURN-TO-HOME (RTH) ACTIVATED! AUV is returning to base station.")
+        st.session_state.swarm_running = False
+        st.error("🚨 EMERGENCY RTH ACTIVATED FOR ALL SWARM UNITS! Returning to base.")
     elif btn_start:
-        st.session_state.is_running = True
-        st.session_state.current_step = 0
-        st.session_state.live_history = []
+        st.session_state.swarm_running = True
+        st.session_state.swarm_step = 0
+        st.session_state.swarm_history = {"AUV-Alpha": [], "AUV-Bravo": [], "AUV-Charlie": []}
         st.session_state.telemetry_logs = []
         st.rerun()
 
-    if st.session_state.is_running:
-        if st.session_state.current_step < len(waypoints):
-            idx = st.session_state.current_step
-            wp = waypoints[idx]
-            
-            battery_pct = max(20, 98 - (idx * 3))
-            current_depth = round(45.0 + (np.sin(idx) * 3.5), 1)
+    if st.session_state.swarm_running:
+        step = st.session_state.swarm_step
+        if step < num_targets:
+            current_active = {}
+            for auv_name, pts in auv_routes.items():
+                wp = pts[step]
+                current_active[auv_name] = wp
 
-            if wp["img"] and os.path.exists(wp["img"]):
-                p_img = Image.open(wp["img"]).convert("RGB")
-                t_img = transform(p_img).unsqueeze(0)
-                with torch.no_grad():
-                    out = model(t_img)
-                    probs = torch.softmax(out, dim=1)[0]
-                    p_i = torch.argmax(probs).item()
-                    conf = float(probs[p_i].item() * 100)
-                pred_label = classes[p_i]
-            else:
-                pred_label = "Safe_Seabed"
-                conf = 92.0
+                # AI Inference influenced by turbidity slider
+                if wp["img"] and os.path.exists(wp["img"]):
+                    p_img = Image.open(wp["img"]).convert("RGB")
+                    t_img = transform(p_img).unsqueeze(0)
+                    with torch.no_grad():
+                        out = model(t_img)
+                        probs = torch.softmax(out, dim=1)[0]
+                        p_i = torch.argmax(probs).item()
+                        conf = float(probs[p_i].item() * 100)
+                        # Turbidity penalty adjustment
+                        conf = max(40.0, conf - (turbidity * 0.8))
+                    pred_label = classes[p_i]
+                else:
+                    pred_label = "Safe_Seabed"
+                    conf = 90.0
 
-            st.session_state.live_history.append({
-                "id": wp["id"], "lat": wp["lat"], "lon": wp["lon"],
-                "img": wp["img"], "pred": pred_label, "conf": conf
-            })
+                st.session_state.swarm_history[auv_name].append({
+                    "id": wp["id"], "lat": wp["lat"], "lon": wp["lon"], "pred": pred_label, "conf": conf
+                })
+
+                st.session_state.mission_records.append({
+                    "Timestamp": datetime.now().strftime("%H:%M:%S"),
+                    "Unit": auv_name,
+                    "Waypoint": f"WP-{wp['id']}",
+                    "Latitude": f"{wp['lat']:.5f}",
+                    "Longitude": f"{wp['lon']:.5f}",
+                    "Classification": pred_label,
+                    "Confidence": f"{conf:.2f}%"
+                })
 
             st.session_state.telemetry_logs.append({
-                "Waypoint": f"WP-{wp['id']}",
-                "Depth (m)": current_depth,
-                "Battery (%)": battery_pct
+                "Step": f"Step-{step+1}",
+                "Alpha Depth": 42.0 + step,
+                "Bravo Depth": 44.5 + step,
+                "Charlie Depth": 40.2 + step
             })
 
-            st.session_state.mission_records.append({
-                "Timestamp": datetime.now().strftime("%H:%M:%S"),
-                "Waypoint": f"WP-{wp['id']}",
-                "Latitude": f"{wp['lat']:.5f}",
-                "Longitude": f"{wp['lon']:.5f}",
-                "Image File": os.path.basename(wp["img"]) if wp["img"] else "N/A",
-                "Classification": pred_label,
-                "Confidence": f"{conf:.2f}%"
-            })
+            m_lat.metric("Swarm Status", "🔴 ACTIVE SWARM")
+            m_lon.metric("Current Velocity", f"{current_speed} Knots")
+            m_batt.metric("Turbidity", f"{turbidity} NTU")
+            m_depth.metric("Active Waypoint", f"{step+1} / {num_targets}")
+            m_stat.metric("Network Link", "99.4% Stable")
 
-            m_lat.metric("Latitude", f"{wp['lat']:.4f}° N")
-            m_lon.metric("Longitude", f"{wp['lon']:.4f}° E")
-            m_batt.metric("Battery Level", f"{battery_pct}%")
-            m_depth.metric("Depth", f"{current_depth} m")
-            m_stat.metric("Status", f"🔴 RUNNING ({idx+1}/{len(waypoints)})")
-            
-            m_obj = render_map(st.session_state.live_history, current=wp)
+            m_obj = render_swarm_map(st.session_state.swarm_history, current_active)
             with map_slot.container():
-                st.markdown("### 🌐 Live AUV Trajectory Map")
+                st.markdown("### 🌐 Live Multi-AUV Swarm Map")
                 components.html(m_obj._repr_html_(), height=420)
 
             with graph_slot.container():
-                st.markdown("### 📈 Live Telemetry Graphs")
-                df_tele = pd.DataFrame(st.session_state.telemetry_logs).set_index("Waypoint")
-                st.write("🌊 **AUV Depth (meters)**")
-                st.line_chart(df_tele[["Depth (m)"]], height=160, color="#00F5D4")
-                st.write("🔋 **Battery Level (%)**")
-                st.line_chart(df_tele[["Battery (%)"]], height=160, color="#FFD166")
+                st.markdown("### 📈 Swarm Depth Telemetry")
+                df_tel = pd.DataFrame(st.session_state.telemetry_logs).set_index("Step")
+                st.line_chart(df_tel, height=330, color=["#00F5D4", "#FFD166", "#0EA5E9"])
 
             time.sleep(sim_delay)
-            st.session_state.current_step += 1
+            st.session_state.swarm_step += 1
             st.rerun()
         else:
-            st.session_state.is_running = False
-            m_lat.metric("Latitude", f"{waypoints[-1]['lat']:.4f}° N")
-            m_lon.metric("Longitude", f"{waypoints[-1]['lon']:.4f}° E")
-            m_batt.metric("Battery Level", "Completed")
-            m_depth.metric("Depth", "45.0 m")
-            m_stat.metric("Status", "✅ COMPLETED")
-            
-            st.success("🎉 Mission Completed Successfully!")
-            m_obj = render_map(st.session_state.live_history)
+            st.session_state.swarm_running = False
+            st.success("🎉 Multi-AUV Swarm Mission Completed Successfully!")
+            m_obj = render_swarm_map(st.session_state.swarm_history)
             with map_slot.container():
-                st.markdown("### 🌐 Final AUV Trajectory Map")
                 components.html(m_obj._repr_html_(), height=420)
-
-            with graph_slot.container():
-                st.markdown("### 📈 Complete Telemetry Graphs")
-                df_tele = pd.DataFrame(st.session_state.telemetry_logs).set_index("Waypoint")
-                st.write("🌊 **AUV Depth (meters)**")
-                st.line_chart(df_tele[["Depth (m)"]], height=160, color="#00F5D4")
-                st.write("🔋 **Battery Level (%)**")
-                st.line_chart(df_tele[["Battery (%)"]], height=160, color="#FFD166")
     else:
-        m_lat.metric("Latitude", f"{base_lat:.4f}° N")
-        m_lon.metric("Longitude", f"{base_lon:.4f}° E")
-        m_batt.metric("Battery Level", "98%")
-        m_depth.metric("Depth", "45.2 m")
-        m_stat.metric("Status", "STANDBY")
-        
-        m_obj = render_map([])
+        m_lat.metric("Swarm Status", "STANDBY")
+        m_lon.metric("Current Velocity", f"{current_speed} Knots")
+        m_batt.metric("Turbidity", f"{turbidity} NTU")
+        m_depth.metric("Active Waypoint", "0 / 0")
+        m_stat.metric("Network Link", "Ready")
+
+        m_obj = render_swarm_map({"AUV-Alpha": [], "AUV-Bravo": [], "AUV-Charlie": []})
         with map_slot.container():
-            st.markdown("### 🌐 AUV Trajectory Map (Standby)")
+            st.markdown("### 🌐 Multi-AUV Swarm Map (Standby)")
             components.html(m_obj._repr_html_(), height=420)
 
         with graph_slot.container():
-            st.markdown("### 📈 Telemetry Graphs (Standby)")
-            dummy_df = pd.DataFrame({"Depth (m)": [45.0, 45.5], "Battery (%)": [98, 97]}, index=["WP-1", "WP-2"])
-            st.write("🌊 **AUV Depth (meters)**")
-            st.line_chart(dummy_df[["Depth (m)"]], height=160, color="#00F5D4")
-            st.write("🔋 **Battery Level (%)**")
-            st.line_chart(dummy_df[["Battery (%)"]], height=160, color="#FFD166")
+            st.markdown("### 📈 Swarm Depth Telemetry (Standby)")
+            dummy_df = pd.DataFrame({"Alpha": [42.0, 43.0], "Bravo": [44.5, 45.0], "Charlie": [40.2, 41.0]}, index=["Step-1", "Step-2"])
+            st.line_chart(dummy_df, height=330, color=["#00F5D4", "#FFD166", "#0EA5E9"])
 
 # ==========================================
-# VIEW 2: TARGET ACOUSTIC SCAN & DYNAMIC FFT & WARNINGS
+# VIEW 2: TARGET ACOUSTIC SCAN & WATERFALL & AUDIO
 # ==========================================
 elif nav_choice == "📡 Target Acoustic Scan & Threat Action":
-    st.title("📡 Target Acoustic Scan & Threat Action")
-    st.write("Analyze individual acoustic files with AI and real-time dynamic frequency spectrum analysis.")
+    st.title("📡 Target Acoustic Scan, Waterfall Display & Threat Action")
+    st.write("Analyze individual acoustic files with Side-Scan Waterfall, Dynamic FFT, and Live Hydrophone Audio.")
 
     if len(real_dataset_files) == 0:
         st.error("❌ कृपया 'dataset' फोल्डरमध्ये काही इमेजेस टाका!")
@@ -414,9 +400,10 @@ elif nav_choice == "📡 Target Acoustic Scan & Threat Action":
             img_np = np.array(raw_pil)
             gray_img = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
 
-            mean_i = float(np.mean(gray_img))
+            # Turbidity & Current influence
+            mean_i = float(np.mean(gray_img)) + (turbidity * 0.5)
             std_i = float(np.std(gray_img))
-            snr = mean_i / (std_i + 1e-5)
+            snr = (mean_i / (std_i + 1e-5)) * (1.0 / (current_speed * 0.1 + 0.9))
 
             t_input = transform(raw_pil).unsqueeze(0)
             with torch.no_grad():
@@ -424,25 +411,58 @@ elif nav_choice == "📡 Target Acoustic Scan & Threat Action":
                 probs = torch.softmax(out, dim=1)[0]
                 p_idx = torch.argmax(probs).item()
                 conf = float(probs[p_idx].item() * 100)
+                conf = min(99.8, max(45.0, conf - (turbidity * 0.6)))
 
             prediction = classes[p_idx]
 
+            # 2-Column layout for Scans
             col_a1, col_a2 = st.columns(2)
             with col_a1:
                 st.subheader("Raw Sonar Scan")
                 st.image(raw_pil, use_container_width=True)
 
             with col_a2:
-                st.subheader("Enhanced Heatmap Analysis")
-                clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-                enhanced = clahe.apply(gray_img)
-                color_map = cv2.applyColorMap(enhanced, cv2.COLORMAP_JET)
-                st.image(color_map, channels="BGR", use_container_width=True)
+                st.subheader("🌊 Side-Scan Sonar Waterfall Display")
+                # Real scrolling waterfall simulation using cv2 colormap
+                resized_wf = cv2.resize(gray_img, (224, 224))
+                waterfall_img = cv2.applyColorMap(resized_wf, cv2.COLORMAP_OCEAN)
+                st.image(waterfall_img, channels="BGR", use_container_width=True)
 
+            # AUDIO PINGER SIMULATOR (HTML5 Web Audio API)
             st.markdown("---")
-            st.subheader("🎵 Acoustic Frequency Spectrum (Dynamic FFT Analysis from Image Pixels)")
+            st.subheader("🔊 Hydrophone Acoustic Ping Simulator")
+            is_mine_threat = (prediction == "Mine_Ordnance" and conf > 70.0)
+            ping_freq = 3800 if is_mine_threat else 1200
             
-            # REAL IMAGE-BASED DYNAMIC FREQUENCY SPECTRUM (OpenCV FFT on Gray Image)
+            audio_html = f"""
+            <div style="background: #0F172A; padding: 15px; border-radius: 8px; border: 1px solid #334155; display: flex; align-items: center; justify-content: space-between;">
+                <div>
+                    <b style="color: {'#FF8888' if is_mine_threat else '#00F5D4'};">Acoustic Signature Frequency: {ping_freq} Hz</b><br>
+                    <span style="color: #94A3B8; font-size: 13px;">Click to emit real-time hydrophone ping sound wave.</span>
+                </div>
+                <button onclick="playPing({ping_freq})" style="background: {'#EF4444' if is_mine_threat else '#00F5D4'}; color: #000; border: none; padding: 10px 20px; font-weight: bold; border-radius: 5px; cursor: pointer; font-family: 'Orbitron', sans-serif;">🔊 EMIT PING</button>
+            </div>
+            <script>
+            function playPing(freq) {{
+                const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                const osc = audioCtx.createOscillator();
+                const gain = audioCtx.createGain();
+                osc.type = 'sine';
+                osc.frequency.value = freq;
+                gain.gain.setValueAtTime(0.3, audioCtx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.5);
+                osc.connect(gain);
+                gain.connect(audioCtx.destination);
+                osc.start();
+                osc.stop(audioCtx.currentTime + 0.5);
+            }}
+            </script>
+            """
+            components.html(audio_html, height=85)
+
+            # FFT Spectrum Graph
+            st.markdown("---")
+            st.subheader("🎵 Acoustic Frequency Spectrum (Dynamic FFT Analysis)")
             f_transform = np.fft.fft2(gray_img)
             f_shift = np.fft.fftshift(f_transform)
             magnitude_spectrum = 20 * np.log(np.abs(f_shift) + 1)
@@ -462,47 +482,38 @@ elif nav_choice == "📡 Target Acoustic Scan & Threat Action":
                 font=dict(color='#FFFFFF'), margin=dict(l=20, r=20, t=20, b=20),
                 xaxis=dict(title='Frequency (Hz)', gridcolor='#334155'),
                 yaxis=dict(title='Amplitude (dB)', gridcolor='#334155'),
-                height=250
+                height=240
             )
             st.plotly_chart(fig_fft, use_container_width=True)
 
+            # Diagnostics & Threat Actions
             st.markdown("---")
             st.subheader("📊 Diagnostics & Dynamic Threat Warnings")
             k1, k2, k3, k4 = st.columns(4)
             k1.metric("Classification", prediction.replace("_", " "))
             k2.metric("AI Confidence", f"{conf:.2f}%")
             k3.metric("SNR Ratio", f"{snr:.2f}")
-            k4.metric("Intensity", f"{mean_i:.1f} / 255")
+            k4.metric("Turbidity Factor", f"{turbidity} NTU")
 
-            # FULLY DYNAMIC WARNING LOGIC BASED ON PREDICTION, CONFIDENCE & SNR
             max_fft_val = float(np.max(freq_profile))
 
-            if prediction == "Mine_Ordnance" and conf > 75.0:
+            if prediction == "Mine_Ordnance" and conf > 70.0:
                 st.markdown('<div class="hazard-box">🚨 CRITICAL THREAT ALERT: High-Probability Bottom Mine Signature Detected! Immediate Countermeasure Required.</div>', unsafe_allow_html=True)
                 st.markdown(f"""
                 <div class="action-box" style="margin-top: 15px;">
                     <b>🛡️ DYNAMIC DEFENSE ACTION PLAN (Target ID: {os.path.basename(selected_file)}):</b><br>
-                    • Acoustic Frequency Peak: <b>{max_fft_val:.1f} dB</b><br>
+                    • Acoustic Frequency Peak: <b>{max_fft_val:.1f} dB</b> | Current Drift: <b>{current_speed} Knots</b><br>
                     1. Establish 1000m Maritime Exclusion Zone around coordinates.<br>
                     2. Deploy Remotely Operated Vehicle (ROV) for optical ID verification.<br>
                     3. Dispatch EOD (Explosive Ordnance Disposal) team for neutralisation.
                 </div>
                 """, unsafe_allow_html=True)
-            elif prediction == "Mine_Ordnance" and conf <= 75.0:
+            elif prediction == "Mine_Ordnance" and conf <= 70.0:
                 st.markdown('<div class="warning-box">⚠️ MODERATE THREAT WARNING: Ambiguous Anomaly Profile Detected. Secondary Scan Recommended.</div>', unsafe_allow_html=True)
                 st.markdown(f"""
                 <div class="action-box" style="margin-top: 15px;">
                     <b>🛡️ DYNAMIC ACTION PLAN:</b><br>
-                    • Low Confidence ({conf:.1f}%). Re-scan target from closer proximity (< 15m altitude).
-                </div>
-                """, unsafe_allow_html=True)
-            elif snr > 4.5 and max_fft_val > 150:
-                st.markdown('<div class="warning-box">⚠️ HIGH RECLAMATION ANOMALY: Unusual Seabed Texture / Metallic Scatterer Found.</div>', unsafe_allow_html=True)
-                st.markdown("""
-                <div class="action-box" style="margin-top: 15px;">
-                    <b>🛡️ DYNAMIC ACTION PLAN:</b><br>
-                    1. Flag target for hydrographic review.<br>
-                    2. Log spatial coordinates for sonar mapping validation.
+                    • Low Confidence ({conf:.1f}%) due to environmental turbidity ({turbidity} NTU). Re-scan target from closer proximity.
                 </div>
                 """, unsafe_allow_html=True)
             else:
@@ -518,7 +529,7 @@ elif nav_choice == "🏔️ 3D Bathymetry Seabed Terrain":
     x = np.linspace(-5, 5, 30)
     y = np.linspace(-5, 5, 30)
     X, Y = np.meshgrid(x, y)
-    Z = np.sin(np.sqrt(X**2 + Y**2)) * 10 - 45
+    Z = np.sin(np.sqrt(X**2 + Y**2)) * (10 + current_speed) - 45
 
     fig_3d = go.Figure(data=[go.Surface(z=Z, x=X, y=Y, colorscale='Viridis')])
     fig_3d.update_layout(
@@ -575,21 +586,42 @@ elif nav_choice == "📦 Bulk Batch Processing Engine":
         st.info("💡 Tip: Upload multiple files using the uploader above.")
 
 # ==========================================
-# VIEW 5: EXECUTIVE AUDIT & EXPORT
+# VIEW 5: EXECUTIVE AUDIT & REPORT GENERATOR
 # ==========================================
-elif nav_choice == "📊 Executive Audit Trail & Export":
-    st.title("📊 Tactical Mission Audit Trail & Report Export")
+elif nav_choice == "📊 Executive Audit Trail & Report":
+    st.title("📊 Tactical Mission Audit Trail & Military Report Generator")
 
     if len(st.session_state.mission_records) > 0:
         df_audit = pd.DataFrame(st.session_state.mission_records)
         st.dataframe(df_audit, use_container_width=True)
 
-        csv_data = df_audit.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="📥 Download CSV Tactical Report",
-            data=csv_data,
-            file_name=f"Naval_MCM_Audit_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-            mime="text/csv"
-        )
+        col_rep1, col_rep2 = st.columns(2)
+        with col_rep1:
+            csv_data = df_audit.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 Download CSV Tactical Report",
+                data=csv_data,
+                file_name=f"Naval_MCM_Audit_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                mime="text/csv"
+            )
+        with col_rep2:
+            # Generate HTML Military Report for Print / PDF Export
+            html_report = f"""
+            <html>
+            <head><style>body {{ font-family: monospace; color: #000; padding: 20px; }} h2 {{ color: #003366; }} table {{ width: 100%; border-collapse: collapse; margin-top: 15px; }} th, td {{ border: 1px solid #ccc; padding: 8px; text-align: left; font-size: 12px; }} th {{ background: #003366; color: #fff; }}</style></head>
+            <body>
+                <h2>NAVAL SUBSEA ACOUSTIC COMMAND - MISSION REPORT</h2>
+                <p><b>Generated:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+                <p><b>Environmental Status:</b> Turbidity: {turbidity} NTU | Current: {current_speed} Knots</p>
+                {df_audit.to_html(index=False)}
+            </body>
+            </html>
+            """
+            st.download_button(
+                label="📄 Download Formatted HTML/PDF Report",
+                data=html_report.encode('utf-8'),
+                file_name=f"Naval_Mission_Report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html",
+                mime="text/html"
+            )
     else:
-        st.info("No mission records found yet. Run a live mission from View 1 first.")
+        st.info("No mission records found yet. Run a multi-AUV swarm mission from View 1 first.")
