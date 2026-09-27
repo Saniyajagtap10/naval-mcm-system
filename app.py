@@ -93,15 +93,6 @@ st.markdown("""
         border-radius: 8px;
         font-weight: bold;
     }
-
-    .action-box {
-        background-color: rgba(14, 165, 233, 0.2);
-        border: 2px solid #0EA5E9;
-        color: #7DD3FC !important;
-        padding: 15px;
-        border-radius: 8px;
-        font-weight: bold;
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -299,16 +290,6 @@ if nav_choice == "🗺️ Multi-AUV Swarm GIS Map & Battery Tracker":
                     folium.CircleMarker(location=[cur["lat"], cur["lon"]], radius=8, color=colors[auv_name], fill=True, fill_color=colors[auv_name], fill_opacity=1.0, tooltip=f"Active: {auv_name}").add_to(m)
         return m
 
-    col_t1, col_t2, col_t3, col_t4, col_t5 = st.columns(5)
-    m_lat = col_t1.empty()
-    m_batt = col_t2.empty()
-    m_depth = col_t4.empty()
-    m_stat = col_t5.empty()
-
-    col_map, col_graph = st.columns([1.2, 0.8])
-    map_slot = col_map.empty()
-    graph_slot = col_graph.empty()
-
     if "swarm_running" not in st.session_state:
         st.session_state.swarm_running = False
     if "swarm_step" not in st.session_state:
@@ -328,6 +309,23 @@ if nav_choice == "🗺️ Multi-AUV Swarm GIS Map & Battery Tracker":
         st.session_state.telemetry_logs = []
         st.rerun()
 
+    # Metrics Row (Always Visible)
+    col_t1, col_t2, col_t3, col_t4 = st.columns(4)
+    
+    current_step_val = st.session_state.swarm_step
+    status_text = "🔴 ACTIVE SWARM" if st.session_state.swarm_running else ("COMPLETED" if current_step_val >= num_targets and len(st.session_state.telemetry_logs) > 0 else "STANDBY")
+    last_batt = st.session_state.telemetry_logs[-1]["Alpha Battery"] if len(st.session_state.telemetry_logs) > 0 else 100.0
+
+    col_t1.metric("Mission Status", status_text)
+    col_t2.metric("Mean Battery Level", f"{last_batt:.1f}%")
+    col_t3.metric("Active Waypoint", f"{min(current_step_val, num_targets)} / {num_targets}")
+    col_t4.metric("De-noising Net", "ConvTranspose Active")
+
+    st.markdown("---")
+
+    # Layout for Map & Telemetry Graph (Always Visible)
+    col_map, col_graph = st.columns([1.2, 0.8])
+    
     if st.session_state.swarm_running:
         step = st.session_state.swarm_step
         if step < num_targets:
@@ -362,17 +360,12 @@ if nav_choice == "🗺️ Multi-AUV Swarm GIS Map & Battery Tracker":
                 "Charlie Battery": max(8.0, battery_pct + 1.2)
             })
 
-            m_lat.metric("Swarm Status", "🔴 ACTIVE")
-            m_batt.metric("Mean Battery", f"{battery_pct:.1f}%")
-            m_depth.metric("Active WP", f"{step+1} / {num_targets}")
-            m_stat.metric("De-noising Net", "Active")
-
             m_obj = render_swarm_map(st.session_state.swarm_history, current_active)
-            with map_slot.container():
+            with col_map:
                 st.markdown("### 🌐 Live Multi-AUV Swarm Map")
                 components.html(m_obj._repr_html_(), height=420)
 
-            with graph_slot.container():
+            with col_graph:
                 st.markdown("### 🔋 Real-Time AUV Battery Drain Telemetry (%)")
                 df_tel = pd.DataFrame(st.session_state.telemetry_logs).set_index("Step")
                 st.line_chart(df_tel, height=330, color=["#00F5D4", "#FFD166", "#0EA5E9"])
@@ -383,25 +376,15 @@ if nav_choice == "🗺️ Multi-AUV Swarm GIS Map & Battery Tracker":
         else:
             st.session_state.swarm_running = False
             st.success("🎉 Multi-AUV Swarm Mission Completed Successfully!")
-            
-            # FIXED: Render full accumulated history instead of empty list
-            m_obj = render_swarm_map(st.session_state.swarm_history)
-            with map_slot.container():
-                st.markdown("### 🌐 Completed Multi-AUV Mission Map")
-                components.html(m_obj._repr_html_(), height=420)
+            st.rerun()
     else:
-        m_lat.metric("Swarm Status", "STANDBY")
-        m_batt.metric("Mean Battery", "100.0%")
-        m_depth.metric("Active WP", "0 / 0")
-        m_stat.metric("De-noising Net", "Ready")
-
-        # FIXED: Preserve existing history if available, else render empty
+        # Render static/completed view with data intact
         m_obj = render_swarm_map(st.session_state.swarm_history)
-        with map_slot.container():
-            st.markdown("### 🌐 Multi-AUV Swarm Map")
+        with col_map:
+            st.markdown("### 🌐 Multi-AUV Swarm Map & Survey Path")
             components.html(m_obj._repr_html_(), height=420)
 
-        with graph_slot.container():
+        with col_graph:
             st.markdown("### 🔋 Real-Time AUV Battery Drain Telemetry (%)")
             if len(st.session_state.telemetry_logs) > 0:
                 df_tel = pd.DataFrame(st.session_state.telemetry_logs).set_index("Step")
@@ -409,6 +392,15 @@ if nav_choice == "🗺️ Multi-AUV Swarm GIS Map & Battery Tracker":
             else:
                 dummy_df = pd.DataFrame({"Alpha": [100, 93], "Bravo": [100, 91], "Charlie": [100, 94]}, index=["Step-1", "Step-2"])
                 st.line_chart(dummy_df, height=330, color=["#00F5D4", "#FFD166", "#0EA5E9"])
+
+    # Live Audit Table below map & graphs
+    st.markdown("---")
+    st.subheader("📋 Live Tactical Mission Log Table")
+    if len(st.session_state.mission_records) > 0:
+        df_audit = pd.DataFrame(st.session_state.mission_records)
+        st.dataframe(df_audit, use_container_width=True)
+    else:
+        st.info("Click '▶️ Launch Swarm Mission' above to generate live tactical survey records.")
 
 # ==========================================
 # VIEW 2: TARGET ACOUSTIC SCAN & REAL GRAD-CAM
