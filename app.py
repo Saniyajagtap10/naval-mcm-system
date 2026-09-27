@@ -163,7 +163,6 @@ transform = transforms.Compose([
 
 classes = ["Mine_Ordnance", "Safe_Seabed"]
 
-# Real-time procedural sonar generator with speckle noise
 def generate_realtime_sonar_scan(seed_val):
     np.random.seed(seed_val)
     base = np.random.normal(120, 30, (224, 224)).astype(np.uint8)
@@ -187,7 +186,6 @@ def generate_realtime_sonar_scan(seed_val):
     img_rgb = cv2.cvtColor(base, cv2.COLOR_GRAY2RGB)
     return Image.fromarray(img_rgb), pred, conf
 
-# Real PyTorch Grad-CAM computation function
 def compute_real_gradcam(model, input_tensor, target_class):
     model.eval()
     activations = []
@@ -199,7 +197,6 @@ def compute_real_gradcam(model, input_tensor, target_class):
     def backward_hook(module, grad_input, grad_output):
         gradients.append(grad_output[0])
         
-    # Hook into last encoder conv layer
     h_fwd = model.encoder[3].register_forward_hook(forward_hook)
     h_bwd = model.encoder[3].register_full_backward_hook(backward_hook)
     
@@ -304,8 +301,7 @@ if nav_choice == "🗺️ Multi-AUV Swarm GIS Map & Battery Tracker":
 
     col_t1, col_t2, col_t3, col_t4, col_t5 = st.columns(5)
     m_lat = col_t1.empty()
-    m_lon = col_t2.empty()
-    m_batt = col_t2.empty() # placeholder
+    m_batt = col_t2.empty()
     m_depth = col_t4.empty()
     m_stat = col_t5.empty()
 
@@ -357,7 +353,6 @@ if nav_choice == "🗺️ Multi-AUV Swarm GIS Map & Battery Tracker":
                     "Confidence": f"{conf:.2f}%"
                 })
 
-            # Real battery calculation formula based on step count and current speed resistance
             battery_pct = max(10.0, 100.0 - (step + 1) * (7.0 + current_speed * 1.5))
 
             st.session_state.telemetry_logs.append({
@@ -367,9 +362,9 @@ if nav_choice == "🗺️ Multi-AUV Swarm GIS Map & Battery Tracker":
                 "Charlie Battery": max(8.0, battery_pct + 1.2)
             })
 
-            m_lat.metric("Swarm Status", "🔴 ACTIVE SWARM")
-            col_t2.metric("Mean Battery", f"{battery_pct:.1f}%")
-            m_depth.metric("Active Waypoint", f"{step+1} / {num_targets}")
+            m_lat.metric("Swarm Status", "🔴 ACTIVE")
+            m_batt.metric("Mean Battery", f"{battery_pct:.1f}%")
+            m_depth.metric("Active WP", f"{step+1} / {num_targets}")
             m_stat.metric("De-noising Net", "Active")
 
             m_obj = render_swarm_map(st.session_state.swarm_history, current_active)
@@ -388,24 +383,32 @@ if nav_choice == "🗺️ Multi-AUV Swarm GIS Map & Battery Tracker":
         else:
             st.session_state.swarm_running = False
             st.success("🎉 Multi-AUV Swarm Mission Completed Successfully!")
+            
+            # FIXED: Render full accumulated history instead of empty list
             m_obj = render_swarm_map(st.session_state.swarm_history)
             with map_slot.container():
+                st.markdown("### 🌐 Completed Multi-AUV Mission Map")
                 components.html(m_obj._repr_html_(), height=420)
     else:
         m_lat.metric("Swarm Status", "STANDBY")
-        col_t2.metric("Mean Battery", "100.0%")
-        m_depth.metric("Active Waypoint", "0 / 0")
+        m_batt.metric("Mean Battery", "100.0%")
+        m_depth.metric("Active WP", "0 / 0")
         m_stat.metric("De-noising Net", "Ready")
 
-        m_obj = render_swarm_map({"AUV-Alpha": [], "AUV-Bravo": [], "AUV-Charlie": []})
+        # FIXED: Preserve existing history if available, else render empty
+        m_obj = render_swarm_map(st.session_state.swarm_history)
         with map_slot.container():
-            st.markdown("### 🌐 Multi-AUV Swarm Map (Standby)")
+            st.markdown("### 🌐 Multi-AUV Swarm Map")
             components.html(m_obj._repr_html_(), height=420)
 
         with graph_slot.container():
-            st.markdown("### 🔋 Real-Time AUV Battery Drain Telemetry (Standby)")
-            dummy_df = pd.DataFrame({"Alpha": [100, 93], "Bravo": [100, 91], "Charlie": [100, 94]}, index=["Step-1", "Step-2"])
-            st.line_chart(dummy_df, height=330, color=["#00F5D4", "#FFD166", "#0EA5E9"])
+            st.markdown("### 🔋 Real-Time AUV Battery Drain Telemetry (%)")
+            if len(st.session_state.telemetry_logs) > 0:
+                df_tel = pd.DataFrame(st.session_state.telemetry_logs).set_index("Step")
+                st.line_chart(df_tel, height=330, color=["#00F5D4", "#FFD166", "#0EA5E9"])
+            else:
+                dummy_df = pd.DataFrame({"Alpha": [100, 93], "Bravo": [100, 91], "Charlie": [100, 94]}, index=["Step-1", "Step-2"])
+                st.line_chart(dummy_df, height=330, color=["#00F5D4", "#FFD166", "#0EA5E9"])
 
 # ==========================================
 # VIEW 2: TARGET ACOUSTIC SCAN & REAL GRAD-CAM
@@ -417,7 +420,6 @@ elif nav_choice == "📡 Target Acoustic Scan & Real Grad-CAM":
     seed_slider = st.slider("Select Live Scan Sector ID:", 1, 50, 1)
     raw_pil, prediction, conf = generate_realtime_sonar_scan(seed_slider)
     
-    # Process through PyTorch Model for real inference & Grad-CAM
     tensor_img = transform(raw_pil).unsqueeze(0)
     with torch.no_grad():
         logits = model(tensor_img)
@@ -426,8 +428,6 @@ elif nav_choice == "📡 Target Acoustic Scan & Real Grad-CAM":
         conf = float(probs[0][pred_idx].item() * 100.0)
     
     prediction = classes[pred_idx]
-    
-    # Compute real Grad-CAM
     cam = compute_real_gradcam(model, tensor_img, pred_idx)
     cam_heatmap = cv2.applyColorMap(np.uint8(255 * cam), cv2.COLORMAP_JET)
     raw_cv = cv2.cvtColor(np.array(raw_pil), cv2.COLOR_RGB2BGR)
