@@ -92,6 +92,15 @@ st.markdown("""
         font-weight: bold;
     }
     
+    .warning-box {
+        background-color: rgba(245, 158, 11, 0.2);
+        border: 2px solid #F59E0B;
+        color: #FCD34D !important;
+        padding: 15px;
+        border-radius: 8px;
+        font-weight: bold;
+    }
+
     .safe-box {
         background-color: rgba(16, 185, 129, 0.2);
         border: 2px solid #10B981;
@@ -102,9 +111,9 @@ st.markdown("""
     }
 
     .action-box {
-        background-color: rgba(245, 158, 11, 0.2);
-        border: 2px solid #F59E0B;
-        color: #FCD34D !important;
+        background-color: rgba(14, 165, 233, 0.2);
+        border: 2px solid #0EA5E9;
+        color: #7DD3FC !important;
         padding: 15px;
         border-radius: 8px;
         font-weight: bold;
@@ -389,7 +398,7 @@ if nav_choice == "🗺️ Real-Time AUV GIS Map & Telemetry":
             st.line_chart(dummy_df[["Battery (%)"]], height=160, color="#FFD166")
 
 # ==========================================
-# VIEW 2: TARGET ACOUSTIC SCAN & DYNAMIC FFT
+# VIEW 2: TARGET ACOUSTIC SCAN & DYNAMIC FFT & WARNINGS
 # ==========================================
 elif nav_choice == "📡 Target Acoustic Scan & Threat Action":
     st.title("📡 Target Acoustic Scan & Threat Action")
@@ -458,25 +467,46 @@ elif nav_choice == "📡 Target Acoustic Scan & Threat Action":
             st.plotly_chart(fig_fft, use_container_width=True)
 
             st.markdown("---")
-            st.subheader("📊 Diagnostics & Threat Status")
+            st.subheader("📊 Diagnostics & Dynamic Threat Warnings")
             k1, k2, k3, k4 = st.columns(4)
             k1.metric("Classification", prediction.replace("_", " "))
             k2.metric("AI Confidence", f"{conf:.2f}%")
             k3.metric("SNR Ratio", f"{snr:.2f}")
             k4.metric("Intensity", f"{mean_i:.1f} / 255")
 
-            if prediction == "Mine_Ordnance":
-                st.markdown('<div class="hazard-box">🚨 HIGH THREAT ANOMALY: Bottom Mine Profile Confirmed.</div>', unsafe_allow_html=True)
+            # FULLY DYNAMIC WARNING LOGIC BASED ON PREDICTION, CONFIDENCE & SNR
+            max_fft_val = float(np.max(freq_profile))
+
+            if prediction == "Mine_Ordnance" and conf > 75.0:
+                st.markdown('<div class="hazard-box">🚨 CRITICAL THREAT ALERT: High-Probability Bottom Mine Signature Detected! Immediate Countermeasure Required.</div>', unsafe_allow_html=True)
+                st.markdown(f"""
+                <div class="action-box" style="margin-top: 15px;">
+                    <b>🛡️ DYNAMIC DEFENSE ACTION PLAN (Target ID: {os.path.basename(selected_file)}):</b><br>
+                    • Acoustic Frequency Peak: <b>{max_fft_val:.1f} dB</b><br>
+                    1. Establish 1000m Maritime Exclusion Zone around coordinates.<br>
+                    2. Deploy Remotely Operated Vehicle (ROV) for optical ID verification.<br>
+                    3. Dispatch EOD (Explosive Ordnance Disposal) team for neutralisation.
+                </div>
+                """, unsafe_allow_html=True)
+            elif prediction == "Mine_Ordnance" and conf <= 75.0:
+                st.markdown('<div class="warning-box">⚠️ MODERATE THREAT WARNING: Ambiguous Anomaly Profile Detected. Secondary Scan Recommended.</div>', unsafe_allow_html=True)
+                st.markdown(f"""
+                <div class="action-box" style="margin-top: 15px;">
+                    <b>🛡️ DYNAMIC ACTION PLAN:</b><br>
+                    • Low Confidence ({conf:.1f}%). Re-scan target from closer proximity (< 15m altitude).
+                </div>
+                """, unsafe_allow_html=True)
+            elif snr > 4.5 and max_fft_val > 150:
+                st.markdown('<div class="warning-box">⚠️ HIGH RECLAMATION ANOMALY: Unusual Seabed Texture / Metallic Scatterer Found.</div>', unsafe_allow_html=True)
                 st.markdown("""
                 <div class="action-box" style="margin-top: 15px;">
-                    <b>🛡️ REAL-TIME DEFENSE ACTION PLAN:</b><br>
-                    1. Establish 500m Maritime Exclusion Zone.<br>
-                    2. Deploy ROV for visual confirmation.<br>
-                    3. Dispatch EOD dive team.
+                    <b>🛡️ DYNAMIC ACTION PLAN:</b><br>
+                    1. Flag target for hydrographic review.<br>
+                    2. Log spatial coordinates for sonar mapping validation.
                 </div>
                 """, unsafe_allow_html=True)
             else:
-                st.markdown('<div class="safe-box">🛡️ CLEAR SEABED: Natural Geology / Sand Ripple. No Action Needed.</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="safe-box">🛡️ CLEAR SEABED: Natural Sand Ripple / Normal Geology (Confidence: {conf:.1f}%, SNR: {snr:.2f}). No Action Needed.</div>', unsafe_allow_html=True)
 
 # ==========================================
 # VIEW 3: 3D BATHYMETRY SEABED TERRAIN
