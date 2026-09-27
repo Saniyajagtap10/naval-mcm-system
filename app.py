@@ -431,14 +431,19 @@ elif nav_choice == "📡 Target Acoustic Scan & Threat Action":
                 st.image(color_map, channels="BGR", use_container_width=True)
 
             st.markdown("---")
-            st.subheader("🎵 Acoustic Frequency Spectrum (Dynamic FFT Analysis)")
+            st.subheader("🎵 Acoustic Frequency Spectrum (Dynamic FFT Analysis from Image Pixels)")
             
-            np.random.seed(int(mean_i + std_i))
-            freqs = np.linspace(100, 5000, 60)
-            power_spectrum = np.abs(np.sin(freqs / (120 + mean_i)) * mean_i * 2.2 + np.random.normal(0, std_i + 2, 60))
+            # REAL IMAGE-BASED DYNAMIC FREQUENCY SPECTRUM (OpenCV FFT on Gray Image)
+            f_transform = np.fft.fft2(gray_img)
+            f_shift = np.fft.fftshift(f_transform)
+            magnitude_spectrum = 20 * np.log(np.abs(f_shift) + 1)
+            
+            h_sz, w_sz = magnitude_spectrum.shape
+            freq_profile = magnitude_spectrum[h_sz // 2, :]
+            freqs = np.linspace(100, 5000, len(freq_profile))
             
             fig_fft = go.Figure(data=go.Scatter(
-                x=freqs, y=power_spectrum, 
+                x=freqs, y=freq_profile, 
                 mode='lines', 
                 line=dict(color='#00F5D4', width=2), 
                 fill='tozeroy'
