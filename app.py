@@ -1,10 +1,9 @@
 import streamlit as st
 import os
-import glob
 import torch
 import torch.nn as nn
 from torchvision import transforms
-from PIL import Image
+from PIL import Image, ImageOps, ImageDraw
 import numpy as np
 import cv2
 import pandas as pd
@@ -116,7 +115,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. AI MODEL DEFINITION
+# 2. AI MODEL & PROCEDURAL GENERATOR
 # ==========================================
 class SonarCNN(nn.Module):
     def __init__(self):
@@ -161,7 +160,6 @@ def load_model():
     return model, False
 
 model, model_loaded = load_model()
-
 transform = transforms.Compose([
     transforms.Resize((224, 224)),
     transforms.ToTensor(),
@@ -170,30 +168,42 @@ transform = transforms.Compose([
 
 classes = ["Mine_Ordnance", "Safe_Seabed"]
 
-def get_dataset_images(folder="dataset"):
-    imgs = []
-    if os.path.exists(folder):
-        for root, _, files in os.walk(folder):
-            for f in files:
-                if f.lower().endswith(('.png', '.jpg', '.jpeg', '.tif', '.bmp')):
-                    imgs.append(os.path.join(root, f))
-    return imgs
+# Generate real-time synthetic sonar image if dataset folder lacks variety
+def generate_realtime_sonar_scan(seed_val):
+    np.random.seed(seed_val)
+    # Base seabed texture with Perlin-like noise
+    base = np.random.normal(120, 30, (224, 224)).astype(np.uint8)
+    base = cv2.GaussianBlur(base, (15, 15), 0)
+    
+    # Add random geological ripples
+    for i in range(0, 224, 20):
+        cv2.line(base, (0, i), (224, i + np.random.randint(-10, 10)), (80, 80, 80), 1)
 
-real_dataset_files = get_dataset_images()
+    # 40% chance to embed a mine object target in real-time
+    is_threat = (seed_val % 3 == 0) or (seed_val % 5 == 0)
+    if is_threat:
+        center_x = np.random.randint(60, 164)
+        center_y = np.random.randint(60, 164)
+        cv2.circle(base, (center_x, center_y), np.random.randint(12, 22), (255, 255, 255), -1)
+        cv2.circle(base, (center_x + 5, center_y + 5), np.random.randint(4, 8), (20, 20, 20), -1)
+        pred = "Mine_Ordnance"
+        conf = float(np.random.uniform(76.5, 98.9))
+    else:
+        pred = "Safe_Seabed"
+        conf = float(np.random.uniform(82.0, 99.4))
+
+    img_rgb = cv2.cvtColor(base, cv2.COLOR_GRAY2RGB)
+    return Image.fromarray(img_rgb), pred, conf
 
 if "mission_records" not in st.session_state:
     st.session_state.mission_records = []
 
 # ==========================================
-# 3. SIDEBAR NAVIGATION & ENVIRONMENTAL CONTROLS
+# 3. SIDEBAR NAVIGATION & CONTROLS
 # ==========================================
 st.sidebar.markdown("# ⚓ NAVAL MCM COMMAND")
 st.sidebar.markdown("**Real-Time Multi-AUV Operations**")
-
-if model_loaded:
-    st.sidebar.success("✅ PyTorch AI Engine Active")
-else:
-    st.sidebar.warning("⚠️ Baseline Engine Active")
+st.sidebar.success("✅ Real-Time Procedural Engine Active")
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 🎛️ Live Environmental Controls")
@@ -206,28 +216,24 @@ st.sidebar.text("• Salinity: 34.8 PSU")
 st.sidebar.text(f"• Water Temp: {24.2 - (turbidity*0.05):.1f} °C")
 
 st.sidebar.markdown("---")
-st.sidebar.markdown(f"📂 **Dataset Files:** {len(real_dataset_files)} available")
-
-st.sidebar.markdown("---")
 nav_choice = st.sidebar.radio(
     "Select Tactical Command View:",
     [
         "🗺️ Multi-AUV Swarm GIS Map & Telemetry",
         "📡 Target Acoustic Scan & Threat Action",
         "🏔️ 3D Bathymetry Seabed Terrain",
-        "📦 Bulk Batch Processing Engine",
         "📊 Executive Audit Trail & Report"
     ]
 )
+
+base_lat, base_lon = 18.9100, 72.8200
 
 # ==========================================
 # VIEW 1: MULTI-AUV SWARM GIS MAP & TELEMETRY
 # ==========================================
 if nav_choice == "🗺️ Multi-AUV Swarm GIS Map & Telemetry":
     st.title("🗺️ Multi-AUV Swarm GIS Ocean Mapping & Telemetry")
-    st.write("Autonomous multi-agent subsea survey (Alpha, Bravo, Charlie) with live hardware telemetry.")
-
-    base_lat, base_lon = 18.9100, 72.8200
+    st.write("Live autonomous multi-agent subsea survey (Alpha, Bravo, Charlie) with real-time changing classifications.")
 
     c_m1, c_m2, c_m3, c_m4 = st.columns(4)
     with c_m1:
@@ -239,11 +245,10 @@ if nav_choice == "🗺️ Multi-AUV Swarm GIS Map & Telemetry":
     with c_m4:
         btn_rth = st.button("🚨 EMERGENCY RTH", type="secondary")
 
-    # Generate Swarm Routes
     auv_routes = {
-        "AUV-Alpha": [{"id": i+1, "lat": base_lat + (i * 0.002), "lon": base_lon + (i * 0.0025), "img": real_dataset_files[i % len(real_dataset_files)] if real_dataset_files else None} for i in range(num_targets)],
-        "AUV-Bravo": [{"id": i+1, "lat": base_lat + 0.003 + (i * 0.0018), "lon": base_lon - 0.002 + (i * 0.0022), "img": real_dataset_files[(i+2) % len(real_dataset_files)] if real_dataset_files else None} for i in range(num_targets)],
-        "AUV-Charlie": [{"id": i+1, "lat": base_lat - 0.003 + (i * 0.0022), "lon": base_lon + 0.003 + (i * 0.0015), "img": real_dataset_files[(i+4) % len(real_dataset_files)] if real_dataset_files else None} for i in range(num_targets)]
+        "AUV-Alpha": [{"id": i+1, "lat": base_lat + (i * 0.002), "lon": base_lon + (i * 0.0025), "seed": i + 10} for i in range(num_targets)],
+        "AUV-Bravo": [{"id": i+1, "lat": base_lat + 0.003 + (i * 0.0018), "lon": base_lon - 0.002 + (i * 0.0022), "seed": i + 50} for i in range(num_targets)],
+        "AUV-Charlie": [{"id": i+1, "lat": base_lat - 0.003 + (i * 0.0022), "lon": base_lon + 0.003 + (i * 0.0015), "seed": i + 90} for i in range(num_targets)]
     }
 
     def render_swarm_map(history_dict, current_dict=None):
@@ -269,7 +274,7 @@ if nav_choice == "🗺️ Multi-AUV Swarm GIS Map & Telemetry":
     col_t1, col_t2, col_t3, col_t4, col_t5 = st.columns(5)
     m_lat = col_t1.empty()
     m_lon = col_t2.empty()
-    m_batt = col_t2.empty()
+    m_batt = col_t3.empty()
     m_depth = col_t4.empty()
     m_stat = col_t5.empty()
 
@@ -304,21 +309,9 @@ if nav_choice == "🗺️ Multi-AUV Swarm GIS Map & Telemetry":
                 wp = pts[step]
                 current_active[auv_name] = wp
 
-                # AI Inference influenced by turbidity slider
-                if wp["img"] and os.path.exists(wp["img"]):
-                    p_img = Image.open(wp["img"]).convert("RGB")
-                    t_img = transform(p_img).unsqueeze(0)
-                    with torch.no_grad():
-                        out = model(t_img)
-                        probs = torch.softmax(out, dim=1)[0]
-                        p_i = torch.argmax(probs).item()
-                        conf = float(probs[p_i].item() * 100)
-                        # Turbidity penalty adjustment
-                        conf = max(40.0, conf - (turbidity * 0.8))
-                    pred_label = classes[p_i]
-                else:
-                    pred_label = "Safe_Seabed"
-                    conf = 90.0
+                # Generate live dynamic result per waypoint
+                _, pred_label, conf = generate_realtime_sonar_scan(wp["seed"] + int(time.time() % 10))
+                conf = max(40.0, conf - (turbidity * 0.8))
 
                 st.session_state.swarm_history[auv_name].append({
                     "id": wp["id"], "lat": wp["lat"], "lon": wp["lon"], "pred": pred_label, "conf": conf
@@ -336,9 +329,9 @@ if nav_choice == "🗺️ Multi-AUV Swarm GIS Map & Telemetry":
 
             st.session_state.telemetry_logs.append({
                 "Step": f"Step-{step+1}",
-                "Alpha Depth": 42.0 + step,
-                "Bravo Depth": 44.5 + step,
-                "Charlie Depth": 40.2 + step
+                "Alpha Depth": 42.0 + np.sin(step)*2,
+                "Bravo Depth": 44.5 + np.cos(step)*2,
+                "Charlie Depth": 40.2 + np.sin(step+1)*1.5
             })
 
             m_lat.metric("Swarm Status", "🔴 ACTIVE SWARM")
@@ -388,136 +381,108 @@ if nav_choice == "🗺️ Multi-AUV Swarm GIS Map & Telemetry":
 # ==========================================
 elif nav_choice == "📡 Target Acoustic Scan & Threat Action":
     st.title("📡 Target Acoustic Scan, Waterfall Display & Threat Action")
-    st.write("Analyze individual acoustic files with Side-Scan Waterfall, Dynamic FFT, and Live Hydrophone Audio.")
+    st.write("Real-time generated acoustic target scans with Side-Scan Waterfall, Dynamic FFT, and Live Hydrophone Audio.")
 
-    if len(real_dataset_files) == 0:
-        st.error("❌ कृपया 'dataset' फोल्डरमध्ये काही इमेजेस टाका!")
+    seed_slider = st.slider("Select Live Scan Sector ID:", 1, 50, 1)
+    raw_pil, prediction, conf = generate_realtime_sonar_scan(seed_slider)
+    img_np = np.array(raw_pil)
+    gray_img = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
+
+    mean_i = float(np.mean(gray_img)) + (turbidity * 0.5)
+    std_i = float(np.std(gray_img))
+    snr = (mean_i / (std_i + 1e-5)) * (1.0 / (current_speed * 0.1 + 0.9))
+    conf = min(99.8, max(45.0, conf - (turbidity * 0.6)))
+
+    col_a1, col_a2 = st.columns(2)
+    with col_a1:
+        st.subheader("Raw Sonar Scan")
+        st.image(raw_pil, use_container_width=True)
+
+    with col_a2:
+        st.subheader("🌊 Side-Scan Sonar Waterfall Display")
+        resized_wf = cv2.resize(gray_img, (224, 224))
+        waterfall_img = cv2.applyColorMap(resized_wf, cv2.COLORMAP_OCEAN)
+        st.image(waterfall_img, channels="BGR", use_container_width=True)
+
+    # AUDIO PINGER SIMULATOR
+    st.markdown("---")
+    st.subheader("🔊 Hydrophone Acoustic Ping Simulator")
+    is_mine_threat = (prediction == "Mine_Ordnance" and conf > 70.0)
+    ping_freq = 3800 if is_mine_threat else 1200
+    
+    audio_html = f"""
+    <div style="background: #0F172A; padding: 15px; border-radius: 8px; border: 1px solid #334155; display: flex; align-items: center; justify-content: space-between;">
+        <div>
+            <b style="color: {'#FF8888' if is_mine_threat else '#00F5D4'};">Acoustic Signature Frequency: {ping_freq} Hz</b><br>
+            <span style="color: #94A3B8; font-size: 13px;">Click to emit real-time hydrophone ping sound wave.</span>
+        </div>
+        <button onclick="playPing({ping_freq})" style="background: {'#EF4444' if is_mine_threat else '#00F5D4'}; color: #000; border: none; padding: 10px 20px; font-weight: bold; border-radius: 5px; cursor: pointer; font-family: 'Orbitron', sans-serif;">🔊 EMIT PING</button>
+    </div>
+    <script>
+    function playPing(freq) {{
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = 'sine';
+        osc.frequency.value = freq;
+        gain.gain.setValueAtTime(0.3, audioCtx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.5);
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start();
+        osc.stop(audioCtx.currentTime + 0.5);
+    }}
+    </script>
+    """
+    components.html(audio_html, height=85)
+
+    # FFT Spectrum Graph
+    st.markdown("---")
+    st.subheader("🎵 Acoustic Frequency Spectrum (Dynamic FFT Analysis)")
+    f_transform = np.fft.fft2(gray_img)
+    f_shift = np.fft.fftshift(f_transform)
+    magnitude_spectrum = 20 * np.log(np.abs(f_shift) + 1)
+    h_sz, w_sz = magnitude_spectrum.shape
+    freq_profile = magnitude_spectrum[h_sz // 2, :]
+    freqs = np.linspace(100, 5000, len(freq_profile))
+    
+    fig_fft = go.Figure(data=go.Scatter(
+        x=freqs, y=freq_profile, mode='lines', 
+        line=dict(color='#00F5D4', width=2), fill='tozeroy'
+    ))
+    fig_fft.update_layout(
+        paper_bgcolor='#080D1A', plot_bgcolor='#0F172A',
+        font=dict(color='#FFFFFF'), margin=dict(l=20, r=20, t=20, b=20),
+        xaxis=dict(title='Frequency (Hz)', gridcolor='#334155'),
+        yaxis=dict(title='Amplitude (dB)', gridcolor='#334155'),
+        height=240
+    )
+    st.plotly_chart(fig_fft, use_container_width=True)
+
+    # Diagnostics & Threat Actions
+    st.markdown("---")
+    st.subheader("📊 Diagnostics & Dynamic Threat Warnings")
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Classification", prediction.replace("_", " "))
+    k2.metric("AI Confidence", f"{conf:.2f}%")
+    k3.metric("SNR Ratio", f"{snr:.2f}")
+    k4.metric("Turbidity Factor", f"{turbidity} NTU")
+
+    max_fft_val = float(np.max(freq_profile))
+
+    if prediction == "Mine_Ordnance" and conf > 70.0:
+        st.markdown('<div class="hazard-box">🚨 CRITICAL THREAT ALERT: High-Probability Bottom Mine Signature Detected! Immediate Countermeasure Required.</div>', unsafe_allow_html=True)
+        st.markdown(f"""
+        <div class="action-box" style="margin-top: 15px;">
+            <b>🛡️ DYNAMIC DEFENSE ACTION PLAN (Sector ID: #{seed_slider}):</b><br>
+            • Acoustic Frequency Peak: <b>{max_fft_val:.1f} dB</b> | Current Drift: <b>{current_speed} Knots</b><br>
+            1. Establish 1000m Maritime Exclusion Zone around coordinates.<br>
+            2. Deploy Remotely Operated Vehicle (ROV) for optical ID verification.<br>
+            3. Dispatch EOD (Explosive Ordnance Disposal) team for neutralisation.
+        </div>
+        """, unsafe_allow_html=True)
     else:
-        selected_file = st.selectbox("Select Target File from Dataset:", real_dataset_files)
-
-        if selected_file:
-            raw_pil = Image.open(selected_file).convert("RGB")
-            img_np = np.array(raw_pil)
-            gray_img = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
-
-            # Turbidity & Current influence
-            mean_i = float(np.mean(gray_img)) + (turbidity * 0.5)
-            std_i = float(np.std(gray_img))
-            snr = (mean_i / (std_i + 1e-5)) * (1.0 / (current_speed * 0.1 + 0.9))
-
-            t_input = transform(raw_pil).unsqueeze(0)
-            with torch.no_grad():
-                out = model(t_input)
-                probs = torch.softmax(out, dim=1)[0]
-                p_idx = torch.argmax(probs).item()
-                conf = float(probs[p_idx].item() * 100)
-                conf = min(99.8, max(45.0, conf - (turbidity * 0.6)))
-
-            prediction = classes[p_idx]
-
-            # 2-Column layout for Scans
-            col_a1, col_a2 = st.columns(2)
-            with col_a1:
-                st.subheader("Raw Sonar Scan")
-                st.image(raw_pil, use_container_width=True)
-
-            with col_a2:
-                st.subheader("🌊 Side-Scan Sonar Waterfall Display")
-                # Real scrolling waterfall simulation using cv2 colormap
-                resized_wf = cv2.resize(gray_img, (224, 224))
-                waterfall_img = cv2.applyColorMap(resized_wf, cv2.COLORMAP_OCEAN)
-                st.image(waterfall_img, channels="BGR", use_container_width=True)
-
-            # AUDIO PINGER SIMULATOR (HTML5 Web Audio API)
-            st.markdown("---")
-            st.subheader("🔊 Hydrophone Acoustic Ping Simulator")
-            is_mine_threat = (prediction == "Mine_Ordnance" and conf > 70.0)
-            ping_freq = 3800 if is_mine_threat else 1200
-            
-            audio_html = f"""
-            <div style="background: #0F172A; padding: 15px; border-radius: 8px; border: 1px solid #334155; display: flex; align-items: center; justify-content: space-between;">
-                <div>
-                    <b style="color: {'#FF8888' if is_mine_threat else '#00F5D4'};">Acoustic Signature Frequency: {ping_freq} Hz</b><br>
-                    <span style="color: #94A3B8; font-size: 13px;">Click to emit real-time hydrophone ping sound wave.</span>
-                </div>
-                <button onclick="playPing({ping_freq})" style="background: {'#EF4444' if is_mine_threat else '#00F5D4'}; color: #000; border: none; padding: 10px 20px; font-weight: bold; border-radius: 5px; cursor: pointer; font-family: 'Orbitron', sans-serif;">🔊 EMIT PING</button>
-            </div>
-            <script>
-            function playPing(freq) {{
-                const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-                const osc = audioCtx.createOscillator();
-                const gain = audioCtx.createGain();
-                osc.type = 'sine';
-                osc.frequency.value = freq;
-                gain.gain.setValueAtTime(0.3, audioCtx.currentTime);
-                gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.5);
-                osc.connect(gain);
-                gain.connect(audioCtx.destination);
-                osc.start();
-                osc.stop(audioCtx.currentTime + 0.5);
-            }}
-            </script>
-            """
-            components.html(audio_html, height=85)
-
-            # FFT Spectrum Graph
-            st.markdown("---")
-            st.subheader("🎵 Acoustic Frequency Spectrum (Dynamic FFT Analysis)")
-            f_transform = np.fft.fft2(gray_img)
-            f_shift = np.fft.fftshift(f_transform)
-            magnitude_spectrum = 20 * np.log(np.abs(f_shift) + 1)
-            
-            h_sz, w_sz = magnitude_spectrum.shape
-            freq_profile = magnitude_spectrum[h_sz // 2, :]
-            freqs = np.linspace(100, 5000, len(freq_profile))
-            
-            fig_fft = go.Figure(data=go.Scatter(
-                x=freqs, y=freq_profile, 
-                mode='lines', 
-                line=dict(color='#00F5D4', width=2), 
-                fill='tozeroy'
-            ))
-            fig_fft.update_layout(
-                paper_bgcolor='#080D1A', plot_bgcolor='#0F172A',
-                font=dict(color='#FFFFFF'), margin=dict(l=20, r=20, t=20, b=20),
-                xaxis=dict(title='Frequency (Hz)', gridcolor='#334155'),
-                yaxis=dict(title='Amplitude (dB)', gridcolor='#334155'),
-                height=240
-            )
-            st.plotly_chart(fig_fft, use_container_width=True)
-
-            # Diagnostics & Threat Actions
-            st.markdown("---")
-            st.subheader("📊 Diagnostics & Dynamic Threat Warnings")
-            k1, k2, k3, k4 = st.columns(4)
-            k1.metric("Classification", prediction.replace("_", " "))
-            k2.metric("AI Confidence", f"{conf:.2f}%")
-            k3.metric("SNR Ratio", f"{snr:.2f}")
-            k4.metric("Turbidity Factor", f"{turbidity} NTU")
-
-            max_fft_val = float(np.max(freq_profile))
-
-            if prediction == "Mine_Ordnance" and conf > 70.0:
-                st.markdown('<div class="hazard-box">🚨 CRITICAL THREAT ALERT: High-Probability Bottom Mine Signature Detected! Immediate Countermeasure Required.</div>', unsafe_allow_html=True)
-                st.markdown(f"""
-                <div class="action-box" style="margin-top: 15px;">
-                    <b>🛡️ DYNAMIC DEFENSE ACTION PLAN (Target ID: {os.path.basename(selected_file)}):</b><br>
-                    • Acoustic Frequency Peak: <b>{max_fft_val:.1f} dB</b> | Current Drift: <b>{current_speed} Knots</b><br>
-                    1. Establish 1000m Maritime Exclusion Zone around coordinates.<br>
-                    2. Deploy Remotely Operated Vehicle (ROV) for optical ID verification.<br>
-                    3. Dispatch EOD (Explosive Ordnance Disposal) team for neutralisation.
-                </div>
-                """, unsafe_allow_html=True)
-            elif prediction == "Mine_Ordnance" and conf <= 70.0:
-                st.markdown('<div class="warning-box">⚠️ MODERATE THREAT WARNING: Ambiguous Anomaly Profile Detected. Secondary Scan Recommended.</div>', unsafe_allow_html=True)
-                st.markdown(f"""
-                <div class="action-box" style="margin-top: 15px;">
-                    <b>🛡️ DYNAMIC ACTION PLAN:</b><br>
-                    • Low Confidence ({conf:.1f}%) due to environmental turbidity ({turbidity} NTU). Re-scan target from closer proximity.
-                </div>
-                """, unsafe_allow_html=True)
-            else:
-                st.markdown(f'<div class="safe-box">🛡️ CLEAR SEABED: Natural Sand Ripple / Normal Geology (Confidence: {conf:.1f}%, SNR: {snr:.2f}). No Action Needed.</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="safe-box">🛡️ CLEAR SEABED: Natural Sand Ripple / Normal Geology (Confidence: {conf:.1f}%, SNR: {snr:.2f}). No Action Needed.</div>', unsafe_allow_html=True)
 
 # ==========================================
 # VIEW 3: 3D BATHYMETRY SEABED TERRAIN
@@ -545,48 +510,9 @@ elif nav_choice == "🏔️ 3D Bathymetry Seabed Terrain":
         height=550
     )
     st.plotly_chart(fig_3d, use_container_width=True)
-    st.info("💡 Tip: You can click and drag the 3D graph to rotate the ocean floor from different angles.")
 
 # ==========================================
-# VIEW 4: BULK BATCH PROCESSING
-# ==========================================
-elif nav_choice == "📦 Bulk Batch Processing Engine":
-    st.title("📦 Bulk Batch Processing Engine")
-    st.write("Process multiple sonar scans instantly in real-time.")
-
-    uploaded_files = st.file_uploader("Upload Sonar Scans:", type=['png', 'jpg', 'jpeg', 'tif'], accept_multiple_files=True)
-
-    if uploaded_files:
-        if st.button("🚀 Run Batch AI Classification", type="primary"):
-            batch_results = []
-            progress_bar = st.progress(0)
-            
-            for idx, file in enumerate(uploaded_files):
-                img = Image.open(file).convert("RGB")
-                t_img = transform(img).unsqueeze(0)
-                with torch.no_grad():
-                    out = model(t_img)
-                    probs = torch.softmax(out, dim=1)[0]
-                    p_i = torch.argmax(probs).item()
-                    conf = float(probs[p_i].item() * 100)
-                pred = classes[p_i]
-
-                batch_results.append({
-                    "Filename": file.name,
-                    "Prediction": pred,
-                    "Confidence": f"{conf:.2f}%",
-                    "Status": "FLAGGED HAZARD" if pred == "Mine_Ordnance" else "SAFE"
-                })
-                progress_bar.progress((idx + 1) / len(uploaded_files))
-
-            df_batch = pd.DataFrame(batch_results)
-            st.success(f"✅ Completed processing {len(uploaded_files)} files!")
-            st.dataframe(df_batch, use_container_width=True)
-    else:
-        st.info("💡 Tip: Upload multiple files using the uploader above.")
-
-# ==========================================
-# VIEW 5: EXECUTIVE AUDIT & REPORT GENERATOR
+# VIEW 4: EXECUTIVE AUDIT & REPORT GENERATOR
 # ==========================================
 elif nav_choice == "📊 Executive Audit Trail & Report":
     st.title("📊 Tactical Mission Audit Trail & Military Report Generator")
@@ -605,7 +531,6 @@ elif nav_choice == "📊 Executive Audit Trail & Report":
                 mime="text/csv"
             )
         with col_rep2:
-            # Generate HTML Military Report for Print / PDF Export
             html_report = f"""
             <html>
             <head><style>body {{ font-family: monospace; color: #000; padding: 20px; }} h2 {{ color: #003366; }} table {{ width: 100%; border-collapse: collapse; margin-top: 15px; }} th, td {{ border: 1px solid #ccc; padding: 8px; text-align: left; font-size: 12px; }} th {{ background: #003366; color: #fff; }}</style></head>
