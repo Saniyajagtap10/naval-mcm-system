@@ -1,3 +1,5 @@
+"""ESCC: Echo–Shadow Counterfactual Consistency research prototype."""
+
 import numpy as np
 import streamlit as st
 import matplotlib.pyplot as plt
@@ -11,7 +13,7 @@ def analyze_escc(
     pixel_size_m=0.05,
     shadow_threshold=0.30,
 ):
-    """Prototype: compare observed dark-region length with expected shadow length."""
+    """Estimate dark-region extent and compare with a simple geometry prior."""
 
     arr = np.asarray(
         image.convert("L") if isinstance(image, Image.Image) else image
@@ -27,18 +29,17 @@ def analyze_escc(
 
     arr = (arr - arr.min()) / (np.ptp(arr) + 1e-9)
 
-    # Estimate dark-region extent from the image intensity profile.
     profile = np.mean(arr, axis=0)
-    threshold = float(np.quantile(profile, shadow_threshold))
-    dark = profile <= threshold
+    cut = float(np.quantile(profile, shadow_threshold))
+    dark = profile <= cut
 
     runs = []
     start = None
 
-    for i, value in enumerate(dark):
-        if value and start is None:
+    for i, val in enumerate(dark):
+        if val and start is None:
             start = i
-        elif not value and start is not None:
+        elif not val and start is not None:
             runs.append((start, i - 1))
             start = None
 
@@ -46,21 +47,18 @@ def analyze_escc(
         runs.append((start, len(dark) - 1))
 
     observed_px = max(
-        (end - begin + 1 for begin, end in runs),
+        (b - a + 1 for a, b in runs),
         default=0,
     )
-
     observed_m = observed_px * pixel_size_m
 
     angle = np.deg2rad(np.clip(grazing_angle_deg, 1, 89))
     expected_m = target_height_m / np.tan(angle)
 
-    score = float(
-        np.exp(
-            -abs(observed_m - expected_m)
-            / max(expected_m, pixel_size_m, 1e-6)
-        )
-    )
+    score = float(np.exp(
+        -abs(observed_m - expected_m)
+        / max(expected_m, pixel_size_m, 1e-6)
+    ))
 
     return {
         "observed_shadow_m": observed_m,
@@ -76,18 +74,14 @@ def render_page():
     st.subheader("🔬 ESCC — Echo–Shadow Counterfactual Consistency")
 
     st.markdown(
-        """
-        This research module compares an observed dark-region estimate
-        with a geometry-based expected shadow length.
-
-        It is an additional analysis module and does not replace the
-        existing SAUG-HPI or RSST detection pipeline.
-        """
+        "This separate research lab compares an observed dark-region estimate "
+        "with a geometry-based expected shadow length. It does not replace "
+        "the existing SAUG-HPI or RSST pipeline."
     )
 
     st.warning(
-        "Prototype only: this heuristic has not been validated for "
-        "real-world underwater hazard detection."
+        "Prototype only: the shadow estimate is heuristic and has not been "
+        "validated for real-world hazard decisions."
     )
 
     upload = st.file_uploader(
@@ -103,13 +97,11 @@ def render_page():
         0.1, 3.0, 0.5, 0.1,
         key="escc_height",
     )
-
     angle = c2.slider(
         "Grazing angle (degrees)",
         5.0, 70.0, 25.0, 1.0,
         key="escc_angle",
     )
-
     pixel = c3.number_input(
         "Pixel scale (m/pixel)",
         min_value=0.001,
@@ -120,7 +112,7 @@ def render_page():
     )
 
     if upload is None:
-        st.info("Upload a sonar image to calculate the ESCC score.")
+        st.info("Upload a sonar image to calculate the ESCC demonstration score.")
         return
 
     try:
@@ -138,17 +130,15 @@ def render_page():
 
         with right:
             st.metric(
-                "ESCC Consistency Score",
+                "ESCC consistency score",
                 f"{result['consistency_score']:.3f}",
             )
-
             st.metric(
-                "Observed Dark-Region Estimate",
+                "Observed dark-region estimate",
                 f"{result['observed_shadow_m']:.2f} m",
             )
-
             st.metric(
-                "Expected Shadow Length",
+                "Expected shadow length",
                 f"{result['expected_shadow_m']:.2f} m",
             )
 
@@ -159,17 +149,17 @@ def render_page():
 
         fig, ax = plt.subplots(figsize=(9, 2.5))
         ax.plot(result["profile"])
-        ax.set_title("Mean Acoustic Intensity Profile")
-        ax.set_xlabel("Range Pixel")
-        ax.set_ylabel("Normalized Intensity")
+        ax.set_title("Mean acoustic intensity profile")
+        ax.set_xlabel("Range pixel")
+        ax.set_ylabel("Normalized intensity")
         ax.grid(alpha=0.25)
 
         st.pyplot(fig)
         plt.close(fig)
 
         st.caption(
-            "The score is a geometric consistency measure, not the "
-            "probability that an object is a mine or hazard."
+            "This score measures agreement with user-selected assumptions. "
+            "It is not the probability that an object is a mine or hazard."
         )
 
     except Exception as exc:
