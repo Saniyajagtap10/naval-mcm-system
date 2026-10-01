@@ -1,721 +1,908 @@
-import time
-import sqlite3
-
+```python
+import streamlit as st
 import numpy as np
 import pandas as pd
-import pydeck as pdk
-import plotly.express as px
-import streamlit as st
+import matplotlib.pyplot as plt
+import sqlite3
+import json
+import time
+from datetime import datetime
+from pathlib import Path
 
-import saug_core as S
-import rsst  # NEW: Range-Scaling Shadow Test
+# ==========================================
+# PRJ-44 AUV SONAR HAZARD CLASSIFICATION
+# ==========================================
 
-# --- Page Configuration ---
 st.set_page_config(
-    page_title="PRJ-44: SAUG-HPI AUV Sonar Hazard Engine",
+    page_title="PRJ-44 | Sonar Intelligence",
     page_icon="🌊",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="expanded"
 )
 
-# --- SQLite (event-based logging: only on state change) ---
-@st.cache_resource
-def init_db():
-    conn = sqlite3.connect("sonar_missions.db", check_same_thread=False)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS mission_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp TEXT, lat REAL, lon REAL, depth REAL,
-            classification TEXT, confidence REAL, snr REAL,
-            uncertainty REAL, hpi REAL
-        )""")
-    # migrate older DBs that lack the new columns
-    cols = [r[1] for r in conn.execute("PRAGMA table_info(mission_logs)")]
-    for c in ("uncertainty", "hpi"):
-        if c not in cols:
-            conn.execute(f"ALTER TABLE mission_logs ADD COLUMN {c} REAL")
-    conn.commit()
-    return conn
-
-db_conn = init_db()
-
-# --- Styling ---
 st.markdown("""
 <style>
-.main { background-color: #03071e; color: #f8f9fa; }
-.stMetric { background-color: #101c38; padding: 15px; border-radius: 8px;
-            box-shadow: 0 4px 12px rgba(0,212,255,.15); border: 1px solid #1d3557; }
-h1, h2, h3 { color: #00b4d8; font-family: 'Courier New', monospace; }
-.stTabs [data-baseweb="tab"] { background-color: #101c38; border-radius: 5px; color: #fff;
-                               padding: 10px 20px; font-weight: bold; }
-.stTabs [aria-selected="true"] { background-color: #00b4d8 !important; color: #03071e !important; }
-@keyframes pulse { 0%{opacity:1} 50%{opacity:.55} 100%{opacity:1} }
-.flash-alert { background-color:#720026; color:#ff4d6d; padding:15px; border-radius:8px;
-               border:2px solid #ff0054; font-weight:bold; text-align:center; animation:pulse 1.5s infinite; }
-.review-alert { background-color:#4a3b00; color:#ffd166; padding:15px; border-radius:8px;
-                border:2px solid #ffb703; font-weight:bold; text-align:center; }
-.novelty-box { background:#101c38; border-left:4px solid #00b4d8; padding:12px 16px;
-               border-radius:6px; margin-bottom:12px; }
+.stApp {
+    background: linear-gradient(135deg, #07111f, #0b1e32);
+    color: #e8f1ff;
+}
+[data-testid="stSidebar"] {
+    background-color: #0a1728;
+}
+h1, h2, h3 {
+    color: #63d9ff !important;
+}
+div[data-testid="stMetric"] {
+    background: #102940;
+    border: 1px solid #214b68;
+    padding: 16px;
+    border-radius: 12px;
+}
+.stButton button {
+    background: #087ea4;
+    color: white;
+    border-radius: 8px;
+    border: none;
+    font-weight: bold;
+}
+.stButton button:hover {
+    background: #10a6d4;
+    color: white;
+}
+.panel {
+    background: #102940;
+    border: 1px solid #214b68;
+    padding: 18px;
+    border-radius: 12px;
+    margin-bottom: 12px;
+}
+.small-note {
+    color: #a9bfd3;
+    font-size: 13px;
+}
 </style>
 """, unsafe_allow_html=True)
 
-DARK = dict(plot_bgcolor="#03071e", paper_bgcolor="#03071e", font_color="white")
-
-# --- Sidebar ---
-st.sidebar.title("🚢 AUV Command Center")
-st.sidebar.info("PRJ-44: SAUG-HPI — Shadow-Aware, Uncertainty-Gated Hazard Persistence Engine")
-st.sidebar.markdown("---")
-st.sidebar.subheader("⚙️ Stream & Detector Config")
-
-live_stream_toggle = st.sidebar.checkbox("🔴 Active AUV Live Telemetry Stream", value=True)
-sea_noise = st.sidebar.slider("Sea / Speckle Noise Level", 0.1, 0.9, 0.45, 0.05)
-unc_max = st.sidebar.slider("Uncertainty Gate (max)", 0.05, 0.6, 0.30, 0.05)
-hpi_thr = st.sidebar.slider("HPI Alert Threshold", 0.2, 0.9, 0.45, 0.05)
-standoff_r = st.sidebar.slider("Standoff Radius (m)", 15, 60, 30, 5)
-relook_on = st.sidebar.checkbox("🔁 Uncertainty-triggered re-look", value=True)
-if st.sidebar.button("🔄 New Mission Scene"):
-    for k in ("scene", "ping_idx", "tracker", "last_state", "alerts_raised"):
-        st.session_state.pop(k, None)
-
-# --- Session state: mission scene, tracker, GPS ---
-if "scene" not in st.session_state:
-    seed = int(time.time()) % 10000
-    st.session_state.scene = S.make_scene(seed, length=1200)
-    st.session_state.seed = seed
-    st.session_state.ping_idx = 0
-    st.session_state.tracker = S.HazardTracker()
-    st.session_state.last_state = "SAFE"
-    st.session_state.alerts_raised = 0
-    st.session_state.track = []
-    st.session_state.hazards = []
-    st.session_state.relooks = 0
-    st.session_state.auv_lat0, st.session_state.auv_lon0 = 15.4989, 73.8278
-
-tracker = st.session_state.tracker
-tracker.unc_max, tracker.hpi_thr = unc_max, hpi_thr
-M_PER_ROW = S.M_PER_ROW
-DEG_PER_M = 1 / 111_000
-
-def auv_position(ping_idx):
-    north = ping_idx * S.STEP * M_PER_ROW
-    return (st.session_state.auv_lat0 + north * DEG_PER_M,
-            st.session_state.auv_lon0 + 0.0002 * np.sin(ping_idx / 6.0))
-
-auv_lat, auv_lon = auv_position(st.session_state.ping_idx)
-auv_depth = round(-45.0 + 1.5 * np.sin(st.session_state.ping_idx / 5.0), 1)
-
-# --- Header ---
-st.title("⚡ PRJ-44: AUV Side-Scan Sonar Hazard Classification Engine")
-st.markdown("### SAUG-HPI: Shadow-Aware · Uncertainty-Gated · Persistence-Confirmed Mine Detection")
-st.markdown("---")
-
-tab1, tab2, tab_twin, tab3, tab4, tab5, tab6 = st.tabs([
-    "🔴 Live Telemetry & Stream",
-    "🧪 SAUG-HPI Novelty Study",
-    "🧊 3D Hazard Digital Twin",
-    "📊 Denoiser Benchmarks",
-    "🧠 Acoustic FFT Spectrum",
-    "🗺️ GIS Mission Track",
-    "💾 SQLite Mission Database",
-])
 
 # ==========================================
-# TAB 1: LIVE STREAM (SAUG-HPI pipeline)
+# DATABASE
 # ==========================================
-with tab1:
-    @st.fragment(run_every=2 if live_stream_toggle else None)
-    def live_stream():
-        ss = st.session_state
-        clean_strip, mines, clutter = ss.scene
-        max_idx = (clean_strip.shape[0] - S.H) // S.STEP
-        if live_stream_toggle and ss.ping_idx < max_idx:
-            ss.ping_idx += 1
-        i = min(ss.ping_idx, max_idx)
-        start = i * S.STEP
 
-        clean, noisy = S.render_ping(clean_strip, start, ss.seed * 7919 + i, sea_noise)
-        if relook_on:
-            a = S.analyse_adaptive(noisy, clean_strip, start, i, sea_noise, unc_max)
-        else:
-            a = S.analyse_ping(noisy, seed=i)
-            a["relooked"] = False
-        if a["relooked"] and live_stream_toggle:
-            ss.relooks += 1
-        geo = S.measure_object(a["denoised"], a["r"], a["c"])
-        geo["cls"] = S.size_class(geo)
-        res = tracker.update(i, a) if live_stream_toggle else dict(state=ss.last_state, hpi=0.0, hits=0)
-        lat, lon = auv_position(i)
-        if live_stream_toggle:
-            ss.track.append((lat, lon, res["state"]))
+DB_PATH = Path(__file__).parent / "sonar_logs.db"
 
-        st.subheader("🔴 Live Side-Scan Ping & Shadow-Aware Inversion")
-        c1, c2, c3 = st.columns(3)
-        c1.image(noisy, clamp=True, use_container_width=True,
-                 caption=f"Raw ping #{i} (range →, along-track ↓)")
-        c2.image(a["denoised"], clamp=True, use_container_width=True,
-                 caption="Shadow-aware denoised output")
-        c3.image(a["wmap"], clamp=True, use_container_width=True,
-                 caption="Structure-protection prior (bright = highlight→shadow zone)")
 
-        snr_in = S.snr_db(clean, noisy)
-        snr_out = S.snr_db(clean, a["denoised"])
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Measured SNR Gain", f"{snr_out - snr_in:+.1f} dB", f"{snr_in:.1f} → {snr_out:.1f} dB")
-        m2.metric("Shadow-Pair Score", f"{a['strength']:.3f}", f"P(MLO) = {a['p']:.2f}")
-        m3.metric("Model Uncertainty", f"{a['unc']:.2f}", "gate OK" if a["unc"] <= unc_max else "ABOVE GATE",
-                  delta_color="normal" if a["unc"] <= unc_max else "inverse")
-        m4.metric("Hazard Persistence Index", f"{res['hpi']:.2f}", f"{res['hits']}/{tracker.n} pings agree")
+def init_db():
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS scans (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scan_time TEXT,
+                hazard TEXT,
+                confidence REAL,
+                risk REAL,
+                noise REAL,
+                snr REAL
+            )
+        """)
 
-        st.markdown("---")
-        left, right = st.columns([1, 1])
-        with left:
-            st.subheader("🎯 Alert Decision")
-            state = res["state"]
-            if state == "CRITICAL":
-                hn = (start + a["r"]) * M_PER_ROW
-                he = a["c"] * S.M_PER_COL
-                if all(np.hypot(hn - h["n"], he - h["e"]) > 20 for h in ss.hazards):
-                    ss.hazards.append(dict(n=hn, e=he))
-                hlat = ss.auv_lat0 + hn * DEG_PER_M
-                hlon = ss.auv_lon0 + he / (111_000 * np.cos(np.radians(ss.auv_lat0)))
-                tw = ss.get("twin")
-                if live_stream_toggle and (tw is None or tw["p"] <= a["p"] or not tw["critical"]):
-                    ss.twin = dict(den=a["denoised"], r=a["r"], c=a["c"], geo=geo, p=a["p"], ping=i, critical=True)
-                st.markdown(f"""<div class="flash-alert">🚨 CONFIRMED {geo['cls'].upper()}<br>
-                    Est. height {geo['height_m']:.2f} m · width {geo['width_m']:.1f} m (from shadow geometry)<br>
-                    Persistent over {res['hits']} pings · HPI {res['hpi']:.2f}<br>
-                    Hazard at Lat {hlat:.5f}°N, Lon {hlon:.5f}°E · Replanning detour (see GIS tab)</div>""",
-                            unsafe_allow_html=True)
-            elif state == "REVIEW":
-                st.markdown(f"""<div class="review-alert">⚠️ HUMAN REVIEW REQUESTED<br>
-                    Candidate unstable or not yet persistent (uncertainty {a['unc']:.2f})</div>""",
-                            unsafe_allow_html=True)
-            else:
-                st.success("✅ Safe navigation corridor — no persistent shadow-pair hazard.")
 
-            # Event-based DB logging (only when state changes)
-            if state != ss.last_state and live_stream_toggle:
-                if state == "CRITICAL":
-                    ss.alerts_raised += 1
-                db_conn.execute(
-                    "INSERT INTO mission_logs (timestamp, lat, lon, depth, classification, confidence, snr, uncertainty, hpi)"
-                    " VALUES (?,?,?,?,?,?,?,?,?)",
-                    (time.strftime("%Y-%m-%d %H:%M:%S"), lat, lon, auv_depth,
-                     {"CRITICAL": "Mine-Like Object (MLO)", "REVIEW": "Needs Human Review",
-                      "SAFE": "Safe Seabed"}[state],
-                     a["p"], float(snr_out), a["unc"], res["hpi"]))
-                db_conn.commit()
-            ss.last_state = state
-            st.caption(f"Alerts raised: {ss.alerts_raised} · Hazards mapped: {len(ss.hazards)} · "
-                       f"Extra re-looks taken: {ss.relooks} · Pings: {i}/{max_idx}"
-                       + (" · 🔁 re-look used on this ping" if a["relooked"] else ""))
+def save_scan(hazard, confidence, risk, noise, snr):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("""
+            INSERT INTO scans
+            (scan_time, hazard, confidence, risk, noise, snr)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            datetime.now().isoformat(timespec="seconds"),
+            hazard,
+            float(confidence),
+            float(risk),
+            float(noise),
+            float(snr)
+        ))
 
-        with right:
-            st.subheader("📈 Detector Score Map (highlight→shadow)")
-            pm, _ = S.pair_map(a["denoised"])
-            fig = px.imshow(pm, color_continuous_scale="Magma", aspect="auto",
-                            labels=dict(color="Pair strength"))
-            fig.update_layout(margin=dict(t=10, b=10, l=10, r=10), **DARK)
-            st.plotly_chart(fig, use_container_width=True)
 
-        tw = ss.get("twin")
-        if live_stream_toggle and a["p"] >= 0.5 and tw is None:
-            ss.twin = dict(den=a["denoised"], r=a["r"], c=a["c"], geo=geo, p=a["p"], ping=i, critical=False)
-        ss.last_analysis = dict(noisy=noisy, lat=lat, lon=lon, depth=auv_depth)
+def load_scans():
+    with sqlite3.connect(DB_PATH) as conn:
+        return pd.read_sql_query(
+            "SELECT * FROM scans ORDER BY id DESC",
+            conn
+        )
 
-    live_stream()
+
+init_db()
+
 
 # ==========================================
-# TAB 2: NOVELTY STUDY (measured, not hardcoded)
+# SONAR DEMO PROCESSING
 # ==========================================
-@st.cache_data(show_spinner=False)
-def cached_experiment(seed, noise):
-    return S.run_experiment(seed, n_scenes=3, noise=noise)
 
-@st.cache_data(show_spinner=False)
-def cached_invariance(seed, noise, amp):
-    return S.invariance_experiment(seed, noise, amp=amp)
+def make_sonar_scene(seed, rows=180, cols=260):
+    rng = np.random.default_rng(seed)
 
-@st.cache_data(show_spinner=False)
-def cached_relook(seed, noise):
-    return S.relook_study(seed, noise, n_scenes=4)
+    x = np.linspace(0, 8 * np.pi, cols)
+    y = np.linspace(0, 5 * np.pi, rows)
 
-with tab2:
-    st.subheader("🧪 SAUG-HPI vs. Baseline Alerting — Measured Experiment")
-    st.markdown("""
-    <div class="novelty-box">
-    <b>Novel contribution.</b> Existing MCM pipelines denoise first, then threshold a classifier.
-    SAUG-HPI closes the loop: (1) the <b>highlight→shadow geometry</b> of a mine is used as a prior inside the
-    denoiser, (2) detection is re-scored under input perturbations to obtain <b>uncertainty</b> that gates alarms,
-    and (3) a <b>Hazard Persistence Index</b> fuses probability, uncertainty and geographic consistency over
-    consecutive pings. All numbers below are computed on synthetic scenes with known ground truth
-    (mines + rock/dark-patch clutter), not hardcoded.
-    </div>""", unsafe_allow_html=True)
+    xx, yy = np.meshgrid(x, y)
 
-    cA, cB = st.columns([1, 3])
-    exp_noise = cA.slider("Experiment noise level", 0.1, 0.9, float(sea_noise), 0.1, key="exp_noise")
-    exp_seed = cA.number_input("Random seed", 1, 9999, 1)
-    with st.spinner("Running 3 scenes × ~75 pings..."):
-        res = cached_experiment(int(exp_seed), float(exp_noise))
+    seabed = (
+        0.20 * np.sin(xx)
+        + 0.15 * np.cos(yy)
+        + 0.12 * np.sin(xx * 0.5 + yy)
+    )
 
-    names = {"A": "A) Brightness threshold (baseline)",
-             "B": "B) Single-ping shadow-pair threshold",
-             "C": "C) SAUG-HPI (proposed)"}
-    rows = []
-    for k, r in res.items():
-        pos, neg = r["tp"] + r["fn"], r["fp"] + r["tn"]
-        prec = r["tp"] / max(r["tp"] + r["fp"], 1)
-        rows.append({"Method": names[k],
-                     "Detection rate (%)": round(100 * r["tp"] / max(pos, 1), 1),
-                     "False-alarm rate (%)": round(100 * r["fp"] / max(neg, 1), 1),
-                     "Precision (%)": round(100 * prec, 1),
-                     "False alarms (count)": r["fp"]})
-    df_exp = pd.DataFrame(rows)
-    st.dataframe(df_exp, use_container_width=True, hide_index=True)
+    image = seabed + rng.normal(0, 0.10, (rows, cols))
 
-    g1, g2 = st.columns(2)
-    with g1:
-        f = px.bar(df_exp, x="Method", y="False-alarm rate (%)", color="False-alarm rate (%)",
-                   color_continuous_scale="Reds", title="False-alarm rate (lower is better)")
-        f.update_layout(xaxis_tickangle=-20, **DARK)
-        st.plotly_chart(f, use_container_width=True)
-    with g2:
-        f = px.bar(df_exp, x="Method", y="Detection rate (%)", color="Detection rate (%)",
-                   color_continuous_scale="Tealgrn", title="Detection rate (higher is better)")
-        f.update_layout(xaxis_tickangle=-20, **DARK)
-        st.plotly_chart(f, use_container_width=True)
-    st.caption("Trade-off to report honestly: persistence adds a few pings of latency, so SAUG-HPI "
-               "can miss the first pings of a new object; it trades that for a large cut in false alarms.")
+    # Simulated sonar returns
+    objects = [
+        (45, 65, 12, 0.9),
+        (100, 150, 18, 1.1),
+        (140, 215, 10, 0.7)
+    ]
 
-    st.markdown("---")
-    st.subheader("🔁 Uncertainty-Triggered Re-Look (Active Sensing) — Measured")
-    st.markdown("""<div class="novelty-box">When the detector is <b>unsure</b> (uncertainty above the gate, or probability in the
-    grey zone 0.25–0.75), the AUV takes extra looks at the same spot and fuses them. Extra sensing time is spent
-    <b>only where it is needed</b>. Below: on those unsure pings only, is the fused decision more often correct?</div>""",
-                unsafe_allow_html=True)
-    rl_noise = st.slider("Re-look study noise level", 0.3, 1.2, 1.0, 0.1, key="rl_noise")
-    with st.spinner("Running re-look study..."):
-        rl = cached_relook(int(exp_seed), float(rl_noise))
-    r1, r2, r3, r4 = st.columns(4)
-    r1.metric("Pings evaluated", rl["pings"])
-    r2.metric("Unsure pings (re-look fired)", rl["unsure"], f"{100*rl['unsure']/max(rl['pings'],1):.1f}% of pings")
-    r3.metric("Single-look correct", f"{rl['single_ok']}/{max(rl['unsure'],1)}")
-    r4.metric("After re-look correct", f"{rl['fused_ok']}/{max(rl['unsure'],1)}",
-              f"{rl['fused_ok']-rl['single_ok']:+d}")
-    st.caption("Honest note: at low noise the detector is rarely unsure, so re-look seldom fires and changes little; "
-               "its benefit appears at high noise.")
+    for cy, cx, radius, strength in objects:
+        yy2, xx2 = np.ogrid[:rows, :cols]
+        mask = (yy2 - cy) ** 2 + (xx2 - cx) ** 2 <= radius ** 2
+        image[mask] += strength
 
-    st.markdown("---")
-    st.subheader("⚖️ Height Invariance Test (Physics Lie-Detector) — Measured")
-    st.markdown("""<div class="novelty-box"><b>In simple words:</b> a real object has one fixed height. As the AUV
-    sees it from different ranges, its <b>shadow length changes</b> (nearer = shorter, farther = longer) but the
-    <b>height worked out from the shadow stays the same</b>. A fake pattern (e.g. a sonar artifact with a fixed-shape
-    shadow) does not follow this physics, so its calculated height keeps changing. The
-    <b>Height Invariance Score (HIS)</b> measures this consistency. Persistence alone cannot reject such artifacts,
-    because they appear in every ping.</div>""", unsafe_allow_html=True)
-    swing = st.slider("AUV sideways swing (m) — how much the range to the object changes", 0.5, 4.5, 4.5, 0.5, key="swing")
-    with st.spinner("Running invariance experiment..."):
-        trk_inv = cached_invariance(int(exp_seed), float(exp_noise), int(round(swing / S.PIX_M)))
-    rows_i, scat = [], []
-    for kind, label in (("mine", "Real mines (physical)"), ("artifact", "Non-physical artifacts")):
-        T = [x for x in trk_inv if x["kind"] == kind and x["n"] >= 4]
-        acc = [x for x in T if x["his"] is not None and x["his"] >= 0.5]
-        rows_i.append({"Object type": label, "Objects tracked": len(T),
-                       "Accepted by persistence only": len(T),
-                       "Accepted after HIS gate": len(acc),
-                       "Mean height variation (cv)": round(float(np.mean([x["cv"] for x in T])), 3) if T else None})
-        for x in T:
-            for rng_m, sh_m, h_m in x["points"]:
-                scat.append({"Range (m)": rng_m, "Shadow length (m)": sh_m, "Type": label})
-    st.dataframe(pd.DataFrame(rows_i), use_container_width=True, hide_index=True)
+        # Simulated acoustic shadow
+        shadow_start = min(cols, cx + radius)
+        shadow_end = min(cols, shadow_start + radius * 3)
+        if shadow_start < shadow_end:
+            image[max(0, cy-radius):min(rows, cy+radius),
+                  shadow_start:shadow_end] -= 0.28
 
-    # NEW: Range-Scaling Shadow Test (RSST) vs old HIS
-    st.markdown("""<div class="novelty-box"><b>NEW — Range-Scaling Shadow Test (RSST):</b> a real object's shadow
-    grows <b>in proportion to range</b> (L = k·R), while a fixed-shape artifact keeps the <b>same shadow length</b>.
-    RSST compares these two models with a log-likelihood ratio and a sequential decision. It needs no altitude,
-    no hand-tuned threshold, and says <b>UNDECIDED</b> when the range did not change enough.</div>""",
-                unsafe_allow_html=True)
-    st.markdown("**RSST (new) vs HIS (old)**")
-    st.dataframe(rsst.rsst_table(trk_inv), use_container_width=True, hide_index=True)
+    image = (image - image.min()) / (
+        image.max() - image.min() + 1e-8
+    )
 
-    if scat:
-        fs = px.scatter(pd.DataFrame(scat), x="Range (m)", y="Shadow length (m)", color="Type", opacity=0.7,
-                        color_discrete_map={"Real mines (physical)": "#00b4d8", "Non-physical artifacts": "#ff4d6d"},
-                        title="Shadow length vs range: real objects follow geometry, artifacts do not")
-        fs.update_layout(**DARK)
-        st.plotly_chart(fs, use_container_width=True)
-    st.caption("Honest notes: (1) the test only works when the range to the object actually changes — with a small "
-               "swing, real and fake look alike (slide the swing down to see this). (2) The artifacts are my simulated "
-               "decoys and the HIS threshold was chosen on this synthetic data, so treat the clean separation as "
-               "optimistic until tested on real sonar.")
+    return image
 
-@st.cache_data(show_spinner=False)
-def cached_height_val(seed, noise):
-    return S.height_validation(seed, noise, trials=8)
 
-with tab_twin:
-    import plotly.graph_objects as go
-    st.subheader("🧊 3D Hazard Digital Twin — Shape-from-Shadow Reconstruction")
-    st.markdown("""<div class="novelty-box"><b>In simple words:</b> a tall object blocks the sonar and leaves a
-    shadow behind it. A taller object makes a longer shadow. Using the shadow length, the AUV's altitude and the range,
-    the code works out the object's <b>height</b> with the formula
-    <code>height = shadow length × altitude ÷ (range + shadow length)</code>, then builds a rotatable
-    <b>3D model</b> with the sonar image draped on top and labels the object by its real size.</div>""",
-                unsafe_allow_html=True)
-    tw = st.session_state.get("twin")
-    if tw is None:
-        st.info("No hazard candidate seen yet — let the live stream run until something is detected.")
-    else:
-        g = tw["geo"]
-        k1, k2, k3, k4, k5 = st.columns(5)
-        k1.metric("Estimated height", f"{g['height_m']:.2f} m")
-        k2.metric("Width", f"{g['width_m']:.1f} m")
-        k3.metric("Shadow length", f"{g['shadow_m']:.1f} m")
-        k4.metric("Range from AUV", f"{g['range_m']:.1f} m")
-        k5.metric("Status", "CONFIRMED" if tw["critical"] else "Candidate")
-        st.markdown(f"**Geometry-based class:** {g['cls']}  ·  seen at ping #{tw['ping']}  ·  P(MLO) = {tw['p']:.2f}")
-        x, y, z, patch = S.reconstruct_3d(tw["den"], tw["r"], tw["c"], g["height_m"])
-        fig3d = go.Figure(go.Surface(x=x, y=y, z=z, surfacecolor=patch, colorscale="Cividis",
-                                     showscale=False, lighting=dict(ambient=0.55, diffuse=0.8, specular=0.3)))
-        fig3d.update_layout(
-            height=520, margin=dict(t=10, b=10, l=0, r=0),
-            scene=dict(xaxis_title="Range (m)", yaxis_title="Along-track (m)", zaxis_title="Height (m)",
-                       aspectratio=dict(x=1.3, y=1.0, z=0.45),
-                       camera=dict(eye=dict(x=1.5, y=-1.6, z=1.0))), **DARK)
-        st.plotly_chart(fig3d, use_container_width=True)
-        st.caption("Pseudo-3D from acoustic geometry (not measured bathymetry): the dome height is derived from the "
-                   "shadow; the colour is the denoised sonar backscatter. Drag to rotate.")
+def add_acoustic_noise(image, noise_level, seed):
+    rng = np.random.default_rng(seed + 1000)
 
-    with st.expander("✅ How accurate is the height estimate? (measured on objects of known height)"):
-        hv = cached_height_val(int(exp_seed), float(exp_noise))
-        df_hv = pd.DataFrame([{"True height (m)": r["true_h"], "Estimated (m)": round(r["est_h"], 2),
-                               "Mean abs. error (m)": round(r["mae"], 2),
-                               "Detected": f"{r['detected']}/{r['trials']}"} for r in hv])
-        st.dataframe(df_hv, use_container_width=True, hide_index=True)
-        fh = px.line(df_hv, x="True height (m)", y="Estimated (m)", markers=True, title="Estimated vs true height")
-        fh.add_shape(type="line", x0=0.3, y0=0.3, x1=1.3, y1=1.3, line=dict(dash="dash", color="#aaa"))
-        fh.update_layout(**DARK)
-        st.plotly_chart(fh, use_container_width=True)
-        st.caption("Dashed line = perfect estimate. Honest note: estimates tend to read ~10–15% low for mid-height "
-                   "objects and get worse at very high noise.")
+    gaussian = rng.normal(
+        0, noise_level, image.shape
+    )
 
-# ==========================================
-# TAB 3: DENOISER BENCHMARK (measured)
-# ==========================================
-@st.cache_data(show_spinner=False)
-def cached_denoise(seed, noise):
-    return S.denoise_benchmark(seed, n=10, noise=noise)
+    speckle = image * rng.normal(
+        0, noise_level * 0.65, image.shape
+    )
 
-with tab3:
-    st.subheader("📊 Denoiser Comparison — Measured vs. Ground-Truth Clean Scene")
-    bench = cached_denoise(int(exp_seed), float(exp_noise))
-    df_b = pd.DataFrame([{"Method": k, "PSNR (dB)": round(v[0], 2), "SNR (dB)": round(v[1], 2),
-                          "MSE": round(v[2], 4)} for k, v in bench.items()])
-    st.dataframe(df_b, use_container_width=True, hide_index=True)
-    f = px.bar(df_b, x="Method", y="PSNR (dB)", color="PSNR (dB)", color_continuous_scale="Viridis")
-    f.update_layout(xaxis_tickangle=-20, **DARK)
-    st.plotly_chart(f, use_container_width=True)
+    noisy = image + gaussian + speckle
+    return np.clip(noisy, 0, 1)
 
-# ==========================================
-# TAB 4: FFT (computed from the live ping)
-# ==========================================
-with tab4:
-    st.subheader("🧠 FFT Spectrum of the Live Range Profile")
-    la = st.session_state.get("last_analysis")
-    if la is None:
-        st.info("Waiting for first ping...")
-    else:
-        profile = la["noisy"].mean(axis=0)
-        profile = profile - profile.mean()
-        spec = np.abs(np.fft.rfft(profile))
-        freqs = np.fft.rfftfreq(len(profile), d=1.0)
-        f = px.line(x=freqs, y=spec, labels={"x": "Spatial frequency (cycles / range bin)", "y": "Magnitude"})
-        f.update_layout(**DARK)
-        st.plotly_chart(f, use_container_width=True)
 
-# ==========================================
-# TAB 5: GIS
-# ==========================================
-with tab5:
-    st.subheader("🗺️ AUV Mission Track · Hazard Zones · Auto Standoff Detour")
-    trk = st.session_state.track
-    hz = st.session_state.hazards
-    if trk:
-        df_t = pd.DataFrame(trk, columns=["lat", "lon", "state"])
-        color = {"SAFE": [0, 212, 255, 200], "REVIEW": [255, 183, 3, 230], "CRITICAL": [255, 0, 84, 255]}
-        df_t["color"] = df_t["state"].map(color)
-        lat0, lon0 = st.session_state.auv_lat0, st.session_state.auv_lon0
-        m_per_deg_lon = 111_000 * np.cos(np.radians(lat0))
-        layers = [
-            pdk.Layer("PathLayer", data=pd.DataFrame({"path": [df_t[["lon", "lat"]].values.tolist()]}),
-                      get_path="path", get_color=[0, 180, 216], width_min_pixels=3),
-            pdk.Layer("ScatterplotLayer", data=df_t, get_position="[lon, lat]",
-                      get_fill_color="color", get_radius=3, pickable=True),
-        ]
-        n_end = max(df_t.lat.iloc[-1] - lat0, 0) / DEG_PER_M + 150
-        route_info = None
-        if hz:
-            hlist = [(h["n"], h["e"]) for h in hz]
-            rn, re_ = S.standoff_route(hlist, standoff_r, 0, n_end)
-            route_info = (rn, re_, S.min_clearance(rn, re_, hlist))
-            df_h = pd.DataFrame({"lat": [lat0 + h["n"] * DEG_PER_M for h in hz],
-                                 "lon": [lon0 + h["e"] / m_per_deg_lon for h in hz]})
-            straight = [[lon0, lat0 + n * DEG_PER_M] for n in (0, n_end)]
-            detour = [[lon0 + e / m_per_deg_lon, lat0 + n * DEG_PER_M] for n, e in zip(rn, re_)]
-            layers += [
-                pdk.Layer("ScatterplotLayer", data=df_h, get_position="[lon, lat]",
-                          get_radius=standoff_r, get_fill_color=[255, 0, 84, 70],
-                          get_line_color=[255, 0, 84, 255], stroked=True, line_width_min_pixels=2),
-                pdk.Layer("ScatterplotLayer", data=df_h, get_position="[lon, lat]",
-                          get_radius=4, get_fill_color=[255, 0, 84, 255]),
-                pdk.Layer("PathLayer", data=pd.DataFrame({"path": [straight]}), get_path="path",
-                          get_color=[160, 160, 160], width_min_pixels=2),
-                pdk.Layer("PathLayer", data=pd.DataFrame({"path": [detour]}), get_path="path",
-                          get_color=[80, 255, 140], width_min_pixels=4),
+def denoise_image(image):
+    # Lightweight local averaging for a runnable demo.
+    # This is NOT a trained deconvolutional CNN.
+    padded = np.pad(image, 1, mode="reflect")
+    result = np.zeros_like(image)
+
+    for dy in range(3):
+        for dx in range(3):
+            result += padded[
+                dy:dy + image.shape[0],
+                dx:dx + image.shape[1]
             ]
-        st.pydeck_chart(pdk.Deck(
-            map_style="dark",
-            initial_view_state=pdk.ViewState(latitude=df_t.lat.iloc[-1], longitude=df_t.lon.iloc[-1],
-                                             zoom=15.5, pitch=30),
-            layers=layers))
-        st.caption("Cyan = surveyed track · Red zone = confirmed hazard + standoff radius · "
-                   "Grey = original transit line · Green = auto-planned safe detour")
-        if route_info:
-            rn, re_, clr = route_info
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Hazards mapped", len(hz))
-            c2.metric("Min. clearance of detour", f"{clr:.1f} m", f"radius {standoff_r} m")
-            extra = float(np.sum(np.hypot(np.diff(rn), np.diff(re_))) - (rn[-1] - rn[0]))
-            c3.metric("Extra distance for safety", f"+{extra:.1f} m")
-        else:
-            st.info("No confirmed hazards yet — the original transit line is safe.")
+
+    return result / 9.0
+
+
+def estimate_snr(reference, observed):
+    signal_power = np.mean(reference ** 2)
+    noise_power = np.mean((reference - observed) ** 2) + 1e-10
+    return float(10 * np.log10(signal_power / noise_power))
+
+
+def detect_hazards(image, threshold=0.70):
+    # Demo threshold-based candidate detection.
+    # Replace with the project's trained classifier for real predictions.
+    mask = image > threshold
+    count = int(mask.sum())
+
+    if count > 1500:
+        label = "HIGH RETURN / POSSIBLE HAZARD"
+    elif count > 400:
+        label = "OBJECT CANDIDATE"
     else:
-        st.info("Start the live stream to build the mission track.")
+        label = "LOW RETURN / REVIEW"
+
+    strength = float(np.clip(image.mean() * 100, 0, 100))
+    return label, strength, mask
+
+
+def calculate_metrics(clean, noisy, denoised):
+    snr_before = estimate_snr(clean, noisy)
+    snr_after = estimate_snr(clean, denoised)
+
+    mse_before = float(np.mean((clean - noisy) ** 2))
+    mse_after = float(np.mean((clean - denoised) ** 2))
+
+    return {
+        "snr_before": snr_before,
+        "snr_after": snr_after,
+        "snr_improvement": snr_after - snr_before,
+        "mse_before": mse_before,
+        "mse_after": mse_after
+    }
+
+
+def make_3d_surface(image):
+    step = 5
+    small = image[::step, ::step]
+
+    yy, xx = np.mgrid[
+        0:small.shape[0],
+        0:small.shape[1]
+    ]
+
+    return xx, yy, small
+
 
 # ==========================================
-# TAB 6: DB
+# SIDEBAR
 # ==========================================
-with tab6:
-    st.subheader("💾 Event-Based SQLite Mission Log")
-    st.markdown("Rows are written only when the alert state **changes**, so the log is a clean event history.")
-    rows = db_conn.execute("SELECT * FROM mission_logs ORDER BY id DESC LIMIT 50").fetchall()
-    if rows:
-        df_logs = pd.DataFrame(rows, columns=["ID", "Timestamp", "Latitude", "Longitude", "Depth (m)",
-                                              "Classification", "Confidence", "SNR (dB)",
-                                              "Uncertainty", "HPI"])
-        st.dataframe(df_logs, use_container_width=True)
-        st.download_button("📥 Export Mission History (CSV)", df_logs.to_csv(index=False).encode("utf-8"),
-                           file_name="SQLite_Mission_Logs.csv", mime="text/csv")
-    else:
-        st.info("No events logged yet. Let the live stream run.")
 
-# ============================================================
-# NEW MODULE: RISK-AND-ENERGY AWARE MISSION INTELLIGENCE
-# ============================================================
+st.sidebar.title("🌊 PRJ-44")
+st.sidebar.caption("AUV SONAR INTELLIGENCE SYSTEM")
 
-st.markdown("---")
-st.header("🧭 Risk-and-Energy Aware Mission Intelligence")
-
-st.markdown("""
-This prototype prioritizes candidate hazards for follow-up sonar scans
-using estimated risk, uncertainty, and scan-energy cost.
-
-Note: The example hazards below are demonstration data. They are not
-live detections from the sonar pipeline.
-""")
-
-# Demonstration hazard candidates
-default_hazards = pd.DataFrame([
-    {"Hazard ID": "H-01", "Risk": 9, "Uncertainty": 0.75, "Scan Energy": 20},
-    {"Hazard ID": "H-02", "Risk": 7, "Uncertainty": 0.35, "Scan Energy": 15},
-    {"Hazard ID": "H-03", "Risk": 5, "Uncertainty": 0.90, "Scan Energy": 30},
-    {"Hazard ID": "H-04", "Risk": 8, "Uncertainty": 0.25, "Scan Energy": 25},
-    {"Hazard ID": "H-05", "Risk": 3, "Uncertainty": 0.40, "Scan Energy": 10},
-])
-
-st.subheader("1. Candidate Hazard Inputs")
-st.caption(
-    "Edit the demonstration values below to test different mission scenarios."
-)
-
-hazards_df = st.data_editor(
-    default_hazards,
-    use_container_width=True,
-    hide_index=True,
-    disabled=["Hazard ID"],
-    column_config={
-        "Risk": st.column_config.NumberColumn(
-            "Risk (1–10)", min_value=1, max_value=10, step=1
-        ),
-        "Uncertainty": st.column_config.NumberColumn(
-            "Uncertainty (0–1)", min_value=0.0, max_value=1.0, step=0.05
-        ),
-        "Scan Energy": st.column_config.NumberColumn(
-            "Scan Energy (units)", min_value=1, step=1
-        ),
-    },
-    key="mission_hazard_editor",
-)
-
-energy_budget = st.slider(
-    "Available scan-energy budget",
-    min_value=10,
-    max_value=100,
-    value=50,
-    step=5,
-    key="mission_energy_budget",
-)
-
-strategy = st.selectbox(
-    "Mission planning strategy",
+page = st.sidebar.radio(
+    "NAVIGATION",
     [
-        "Balanced",
-        "Risk-first",
-        "Energy-saving",
-    ],
-    key="mission_planning_strategy",
+        "Mission Overview",
+        "Live Sonar Analysis",
+        "Denoising Laboratory",
+        "3D Seabed View",
+        "Experiment Benchmark",
+        "Mission Planner",
+        "Scan History",
+        "Project Information"
+    ]
 )
 
-# Validate inputs
-valid_hazards = hazards_df.copy()
+st.sidebar.divider()
+st.sidebar.markdown("### Scan Configuration")
 
-valid_hazards["Risk"] = pd.to_numeric(
-    valid_hazards["Risk"], errors="coerce"
-)
-valid_hazards["Uncertainty"] = pd.to_numeric(
-    valid_hazards["Uncertainty"], errors="coerce"
-)
-valid_hazards["Scan Energy"] = pd.to_numeric(
-    valid_hazards["Scan Energy"], errors="coerce"
+seed = st.sidebar.number_input(
+    "Scenario seed",
+    min_value=1,
+    max_value=999999,
+    value=44,
+    step=1
 )
 
-valid_hazards = valid_hazards.dropna(
-    subset=["Risk", "Uncertainty", "Scan Energy"]
+noise_level = st.sidebar.slider(
+    "Acoustic noise level",
+    min_value=0.01,
+    max_value=0.40,
+    value=0.15,
+    step=0.01
 )
 
-valid_hazards = valid_hazards[
-    valid_hazards["Risk"].between(1, 10)
-    & valid_hazards["Uncertainty"].between(0, 1)
-    & (valid_hazards["Scan Energy"] > 0)
-]
+st.sidebar.markdown(
+    '<p class="small-note">Educational prototype using simulated sonar data.</p>',
+    unsafe_allow_html=True
+)
 
-if valid_hazards.empty:
-    st.warning("Enter at least one valid hazard candidate.")
-else:
-    # Normalize risk and uncertainty to a 0–1 scale.
-    risk_score = valid_hazards["Risk"] / 10.0
-    uncertainty_score = valid_hazards["Uncertainty"]
 
-    if strategy == "Balanced":
-        valid_hazards["Priority Score"] = (
-            0.60 * risk_score + 0.40 * uncertainty_score
+# ==========================================
+# SHARED SCENE
+# ==========================================
+
+clean = make_sonar_scene(int(seed))
+noisy = add_acoustic_noise(
+    clean, float(noise_level), int(seed)
+)
+denoised = denoise_image(noisy)
+
+hazard_label, confidence, hazard_mask = detect_hazards(
+    denoised
+)
+
+risk_score = float(np.clip(
+    confidence * 0.65
+    + noise_level * 100 * 0.35,
+    0,
+    100
+))
+
+metrics = calculate_metrics(clean, noisy, denoised)
+
+
+# ==========================================
+# REUSABLE CHART
+# ==========================================
+
+def show_image(image, title, cmap="viridis"):
+    fig, ax = plt.subplots(figsize=(8, 3.6))
+    ax.imshow(image, cmap=cmap, aspect="auto")
+    ax.set_title(title, color="white")
+    ax.set_xlabel("Range / pixels", color="white")
+    ax.set_ylabel("Ping / pixels", color="white")
+    ax.tick_params(colors="white")
+    fig.patch.set_facecolor("#102940")
+    ax.set_facecolor("#102940")
+    st.pyplot(fig)
+    plt.close(fig)
+
+
+def metric_card(title, value, help_text=None):
+    st.metric(title, value, help=help_text)
+
+
+# ==========================================
+# PAGE 1: OVERVIEW
+# ==========================================
+
+if page == "Mission Overview":
+
+    st.title("🌊 AUV Sonar Intelligence Dashboard")
+    st.write(
+        "Side-scan sonar hazard analysis, acoustic denoising "
+        "and mission-risk monitoring."
+    )
+
+    st.info(
+        "DEMO MODE — Current data is simulated. "
+        "Predictions and metrics are not validated real-world model results."
+    )
+
+    a, b, c, d = st.columns(4)
+
+    a.metric("Hazard Candidate", hazard_label)
+    b.metric("Return Intensity", f"{confidence:.1f}%")
+    c.metric("Mission Risk Index", f"{risk_score:.1f}/100")
+    d.metric("SNR Improvement", f"{metrics['snr_improvement']:.2f} dB")
+
+    st.divider()
+
+    left, right = st.columns(2)
+
+    with left:
+        show_image(noisy, "Raw Noisy Sonar", "gray")
+
+    with right:
+        show_image(denoised, "Denoised Sonar", "gray")
+
+    st.subheader("System Modules")
+
+    modules = [
+        ("01", "Acoustic Input", "Sonar scene and noise simulation"),
+        ("02", "Feature Denoising", "Lightweight image smoothing"),
+        ("03", "Hazard Screening", "Threshold-based object candidate screening"),
+        ("04", "Risk Monitoring", "Demonstration risk index"),
+        ("05", "Experiment Tracking", "SQLite scan history"),
+        ("06", "Mission Planning", "Risk-aware waypoint simulation")
+    ]
+
+    cols = st.columns(3)
+
+    for i, item in enumerate(modules):
+        with cols[i % 3]:
+            st.markdown(
+                f"""
+                <div class="panel">
+                    <h3>{item[0]} · {item[1]}</h3>
+                    <p>{item[2]}</p>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
+
+# ==========================================
+# PAGE 2: LIVE SONAR ANALYSIS
+# ==========================================
+
+elif page == "Live Sonar Analysis":
+
+    st.title("🔎 Sonar Scan Analysis")
+
+    st.write(
+        "Inspect a simulated sonar scene, its denoised output "
+        "and the detected candidate regions."
+    )
+
+    uploaded = st.file_uploader(
+        "Optional: upload a sonar image",
+        type=["png", "jpg", "jpeg", "bmp", "tif", "tiff"]
+    )
+
+    if uploaded is not None:
+        from PIL import Image
+
+        input_image = Image.open(uploaded).convert("L")
+        input_image = input_image.resize((260, 180))
+        source = np.asarray(input_image, dtype=np.float32) / 255.0
+
+        noisy_live = source
+        denoised_live = denoise_image(source)
+
+        label_live, confidence_live, mask_live = detect_hazards(
+            denoised_live
         )
 
-    elif strategy == "Risk-first":
-        valid_hazards["Priority Score"] = (
-            0.80 * risk_score + 0.20 * uncertainty_score
+        metrics_live = calculate_metrics(
+            source, noisy_live, denoised_live
         )
 
+        st.caption(
+            "For uploaded images, the uploaded image is treated as the input reference. "
+            "SNR values are not meaningful without a known clean reference."
+        )
     else:
-        valid_hazards["Priority Score"] = (
-            0.60 * risk_score + 0.40 * uncertainty_score
-        ) / valid_hazards["Scan Energy"]
+        source = clean
+        noisy_live = noisy
+        denoised_live = denoised
+        label_live = hazard_label
+        confidence_live = confidence
+        mask_live = hazard_mask
+        metrics_live = metrics
 
-    # Greedy energy-constrained selection.
-    # This is a heuristic, not a guaranteed optimal solution.
-    ranked = valid_hazards.sort_values(
-        "Priority Score", ascending=False
-    ).copy()
+    c1, c2, c3 = st.columns(3)
 
-    selected_ids = []
-    remaining_energy = int(energy_budget)
+    c1.metric("Screening Result", label_live)
+    c2.metric("Mean Return Index", f"{confidence_live:.2f}%")
+    c3.metric("Noise Level", f"{noise_level:.2f}")
 
-    for _, hazard in ranked.iterrows():
-        cost = int(hazard["Scan Energy"])
+    col1, col2 = st.columns(2)
 
-        if cost <= remaining_energy:
-            selected_ids.append(hazard["Hazard ID"])
-            remaining_energy -= cost
+    with col1:
+        show_image(noisy_live, "Input Sonar", "gray")
 
-    valid_hazards["Recommended Scan"] = valid_hazards[
-        "Hazard ID"
-    ].isin(selected_ids)
+    with col2:
+        show_image(denoised_live, "Processed Sonar", "gray")
 
-    valid_hazards["Priority Score"] = valid_hazards[
-        "Priority Score"
-    ].round(3)
+    st.subheader("Candidate Region Mask")
+    show_image(mask_live.astype(float), "Threshold Candidate Mask", "inferno")
 
-    recommended = valid_hazards[
-        valid_hazards["Recommended Scan"]
-    ].sort_values("Priority Score", ascending=False)
-
-    # Mission summary
-    total_energy = int(energy_budget) - remaining_energy
-
-    m1, m2, m3, m4 = st.columns(4)
-
-    m1.metric(
-        "Candidate Hazards",
-        len(valid_hazards),
-    )
-
-    m2.metric(
-        "Recommended Scans",
-        len(recommended),
-    )
-
-    m3.metric(
-        "Energy Used",
-        f"{total_energy} / {energy_budget}",
-    )
-
-    m4.metric(
-        "Energy Remaining",
-        remaining_energy,
-    )
-
-    st.subheader("2. Recommended Follow-up Scans")
-
-    if recommended.empty:
-        st.info(
-            "No candidate fits the current energy budget. "
-            "Increase the budget or review scan-energy costs."
+    if st.button("Save Current Scan to History"):
+        save_scan(
+            label_live,
+            confidence_live,
+            risk_score,
+            noise_level,
+            metrics_live["snr_after"]
         )
-    else:
+        st.success("Scan record saved to local SQLite history.")
+
+
+# ==========================================
+# PAGE 3: DENOISING LAB
+# ==========================================
+
+elif page == "Denoising Laboratory":
+
+    st.title("🧪 Acoustic Denoising Laboratory")
+
+    st.write(
+        "Compare a simulated clean scene, noisy input and a "
+        "lightweight smoothing result."
+    )
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        show_image(clean, "Reference Scene", "gray")
+
+    with col2:
+        show_image(noisy, "Noisy Input", "gray")
+
+    with col3:
+        show_image(denoised, "Smoothed Output", "gray")
+
+    st.subheader("Signal Quality Metrics")
+
+    c1, c2, c3 = st.columns(3)
+
+    c1.metric(
+        "Input SNR",
+        f"{metrics['snr_before']:.2f} dB"
+    )
+
+    c2.metric(
+        "Output SNR",
+        f"{metrics['snr_after']:.2f} dB"
+    )
+
+    c3.metric(
+        "SNR Change",
+        f"{metrics['snr_improvement']:.2f} dB"
+    )
+
+    st.subheader("Mean Squared Error")
+
+    error_df = pd.DataFrame({
+        "Stage": ["Noisy Input", "Smoothed Output"],
+        "MSE": [
+            metrics["mse_before"],
+            metrics["mse_after"]
+        ]
+    })
+
+    st.bar_chart(error_df.set_index("Stage"))
+
+    st.warning(
+        "The current denoiser is a 3×3 averaging filter, not a "
+        "deconvolutional CNN. Do not report these demo metrics as "
+        "trained-model performance."
+    )
+
+
+# ==========================================
+# PAGE 4: 3D VIEW
+# ==========================================
+
+elif page == "3D Seabed View":
+
+    st.title("🗺️ 3D Seabed Intensity View")
+
+    st.write(
+        "A 3D surface representation of simulated sonar intensity. "
+        "Height represents intensity, not measured physical seabed depth."
+    )
+
+    xx, yy, zz = make_3d_surface(denoised)
+
+    fig = plt.figure(figsize=(11, 6))
+    ax = fig.add_subplot(111, projection="3d")
+
+    surface = ax.plot_surface(
+        xx, yy, zz,
+        cmap="viridis",
+        linewidth=0,
+        antialiased=True
+    )
+
+    ax.set_title("Simulated Sonar Intensity Surface", color="white")
+    ax.set_xlabel("Range", color="white")
+    ax.set_ylabel("Ping", color="white")
+    ax.set_zlabel("Intensity", color="white")
+
+    fig.colorbar(surface, shrink=0.5, aspect=10)
+    fig.patch.set_facecolor("#102940")
+    ax.set_facecolor("#102940")
+
+    st.pyplot(fig)
+    plt.close(fig)
+
+    st.subheader("High-Return Candidate Locations")
+
+    locations = np.argwhere(hazard_mask)
+
+    if len(locations) > 0:
+        sample = locations[::max(1, len(locations) // 100)]
+
+        location_df = pd.DataFrame({
+            "Ping / Row": sample[:, 0],
+            "Range / Column": sample[:, 1],
+            "Intensity": denoised[
+                sample[:, 0], sample[:, 1]
+            ]
+        })
+
         st.dataframe(
-            recommended[
-                [
-                    "Hazard ID",
-                    "Risk",
-                    "Uncertainty",
-                    "Scan Energy",
-                    "Priority Score",
-                ]
-            ],
-            use_container_width=True,
-            hide_index=True,
+            location_df.head(100),
+            use_container_width=True
+        )
+    else:
+        st.info("No pixels crossed the selected threshold.")
+
+
+# ==========================================
+# PAGE 5: BENCHMARK
+# ==========================================
+
+elif page == "Experiment Benchmark":
+
+    st.title("📊 Experiment Benchmark")
+
+    st.write(
+        "Run repeatable simulated experiments at different "
+        "noise levels and compare signal-quality measurements."
+    )
+
+    experiment_count = st.slider(
+        "Number of scenes",
+        min_value=3,
+        max_value=30,
+        value=10
+    )
+
+    if st.button("Run Benchmark Experiment"):
+        rows = []
+        progress = st.progress(0)
+
+        for i in range(experiment_count):
+            scene = make_sonar_scene(int(seed) + i)
+            noisy_scene = add_acoustic_noise(
+                scene,
+                float(noise_level),
+                int(seed) + i
+            )
+            output = denoise_image(noisy_scene)
+
+            m = calculate_metrics(scene, noisy_scene, output)
+            label, conf, mask = detect_hazards(output)
+
+            rows.append({
+                "Scene": i + 1,
+                "Hazard Screening": label,
+                "Return Index (%)": conf,
+                "Input SNR (dB)": m["snr_before"],
+                "Output SNR (dB)": m["snr_after"],
+                "SNR Change (dB)": m["snr_improvement"],
+                "Input MSE": m["mse_before"],
+                "Output MSE": m["mse_after"]
+            })
+
+            progress.progress((i + 1) / experiment_count)
+
+        results = pd.DataFrame(rows)
+
+        st.session_state["benchmark_results"] = results
+
+        st.success("Simulated benchmark completed.")
+
+    if "benchmark_results" in st.session_state:
+        results = st.session_state["benchmark_results"]
+
+        c1, c2, c3 = st.columns(3)
+
+        c1.metric(
+            "Mean Input SNR",
+            f"{results['Input SNR (dB)'].mean():.2f} dB"
         )
 
-    st.subheader("3. All Candidates and Priority")
+        c2.metric(
+            "Mean Output SNR",
+            f"{results['Output SNR (dB)'].mean():.2f} dB"
+        )
 
-    st.dataframe(
-        valid_hazards.sort_values(
-            "Priority Score", ascending=False
-        ),
-        use_container_width=True,
-        hide_index=True,
+        c3.metric(
+            "Mean SNR Change",
+            f"{results['SNR Change (dB)'].mean():.2f} dB"
+        )
+
+        st.dataframe(results, use_container_width=True)
+
+        st.subheader("SNR Comparison")
+
+        chart_df = results[
+            ["Scene", "Input SNR (dB)", "Output SNR (dB)"]
+        ].set_index("Scene")
+
+        st.line_chart(chart_df)
+
+        csv = results.to_csv(index=False).encode("utf-8")
+
+        st.download_button(
+            "Download Benchmark CSV",
+            data=csv,
+            file_name="prj44_benchmark.csv",
+            mime="text/csv"
+        )
+
+        st.download_button(
+            "Download Benchmark JSON",
+            data=results.to_json(
+                orient="records", indent=2
+            ),
+            file_name="prj44_benchmark.json",
+            mime="application/json"
+        )
+
+        st.caption(
+            "Accuracy, precision, recall and F1 are not calculated "
+            "because this demo has no ground-truth hazard labels."
+        )
+
+
+# ==========================================
+# PAGE 6: MISSION PLANNER
+# ==========================================
+
+elif page == "Mission Planner":
+
+    st.title("🧭 Risk-Aware Mission Planner")
+
+    st.write(
+        "Create a simulated AUV route and inspect its waypoint "
+        "risk values. Coordinates are illustrative, not GPS positions."
     )
+
+    number_waypoints = st.slider(
+        "Number of waypoints",
+        min_value=5,
+        max_value=30,
+        value=12
+    )
+
+    route_seed = st.number_input(
+        "Route seed",
+        min_value=1,
+        max_value=999999,
+        value=44,
+        key="route_seed"
+    )
+
+    rng = np.random.default_rng(int(route_seed))
+
+    x = np.cumsum(rng.uniform(0.7, 1.3, number_waypoints))
+    y = np.cumsum(rng.uniform(-0.5, 0.5, number_waypoints))
+
+    waypoint_risks = rng.uniform(5, 95, number_waypoints)
+
+    route_df = pd.DataFrame({
+        "Waypoint": np.arange(1, number_waypoints + 1),
+        "Route X (relative)": x.round(2),
+        "Route Y (relative)": y.round(2),
+        "Simulated Risk": waypoint_risks.round(1),
+        "Suggested Action": [
+            "Review" if r >= 65 else "Continue monitoring"
+            for r in waypoint_risks
+        ]
+    })
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+
+    points = ax.scatter(
+        x, y,
+        c=waypoint_risks,
+        s=100,
+        cmap="RdYlGn_r"
+    )
+
+    ax.plot(x, y, linestyle="--", alpha=0.7)
+
+    for i in range(number_waypoints):
+        ax.annotate(str(i + 1), (x[i], y[i]))
+
+    fig.colorbar(points, ax=ax, label="Simulated Risk")
+    ax.set_title("Illustrative AUV Route")
+    ax.set_xlabel("Relative X")
+    ax.set_ylabel("Relative Y")
+    ax.grid(alpha=0.2)
+
+    st.pyplot(fig)
+    plt.close(fig)
+
+    st.dataframe(route_df, use_container_width=True)
 
     st.download_button(
-        "📥 Export Mission Scan Plan (CSV)",
-        data=valid_hazards.to_csv(index=False).encode("utf-8"),
-        file_name="mission_scan_plan.csv",
-        mime="text/csv",
-        key="download_mission_scan_plan",
+        "Export Route CSV",
+        data=route_df.to_csv(index=False).encode("utf-8"),
+        file_name="prj44_mission_route.csv",
+        mime="text/csv"
     )
 
-    st.caption(
-        "Research prototype: priorities use a heuristic and demonstration "
-        "inputs. Validate against real sonar detections, mission constraints, "
-        "and measured energy consumption before operational use."
+    st.warning(
+        "This is a synthetic route demonstration. It does not use "
+        "real bathymetry, GPS, vehicle dynamics, or validated collision avoidance."
     )
+
+
+# ==========================================
+# PAGE 7: SCAN HISTORY
+# ==========================================
+
+elif page == "Scan History":
+
+    st.title("🗄️ Scan History & Audit Log")
+
+    history = load_scans()
+
+    if history.empty:
+        st.info(
+            "No saved scans yet. Open Live Sonar Analysis and "
+            "click 'Save Current Scan to History'."
+        )
+    else:
+        st.metric("Stored Scan Records", len(history))
+
+        st.dataframe(
+            history,
+            use_container_width=True
+        )
+
+        st.download_button(
+            "Export History CSV",
+            data=history.to_csv(index=False).encode("utf-8"),
+            file_name="prj44_scan_history.csv",
+            mime="text/csv"
+        )
+
+        if st.button("Delete All Local Scan History"):
+            with sqlite3.connect(DB_PATH) as conn:
+                conn.execute("DELETE FROM scans")
+
+            st.success("Local scan history cleared.")
+            st.rerun()
+
+
+# ==========================================
+# PAGE 8: PROJECT INFORMATION
+# ==========================================
+
+elif page == "Project Information":
+
+    st.title("ℹ️ Project Information")
+
+    st.markdown("""
+    ### PRJ-44: AUV Side-Scan Sonar Hazard Classification Engine
+
+    **Project objective**
+
+    Demonstrate an interface for inspecting sonar images, reducing
+    image noise, screening candidate regions and recording experiments.
+
+    ### Proposed research workflow
+
+    1. Acquire side-scan sonar images.
+    2. Apply acoustic image preprocessing.
+    3. Reconstruct or denoise distorted sonar imagery.
+    4. Classify hazards using a trained model.
+    5. Compare model outputs with ground-truth labels.
+    6. Evaluate classification and signal-quality metrics.
+    7. Store scan results and review mission risk.
+
+    ### Current prototype implementation
+
+    - Simulated sonar scene generation.
+    - Adjustable synthetic noise.
+    - 3×3 local averaging filter.
+    - Intensity-threshold candidate screening.
+    - SNR and MSE measurements on simulated reference images.
+    - 3D intensity surface visualization.
+    - Simulated route and waypoint-risk display.
+    - SQLite scan history.
+    - CSV and JSON experiment exports.
+
+    ### Important limitations
+
+    This version does **not** implement a trained deconvolutional CNN,
+    validated MILCO/NOMBO classification, real GPS/GIS mapping,
+    or measured underwater depth reconstruction.
+
+    Classification accuracy, precision, recall, F1-score and confusion
+    matrix require labelled test data and actual predictions.
+    Do not present synthetic demonstration results as real-world accuracy.
+    """)
+
+    st.subheader("Environment")
+
+    st.code("""
+Python
+Streamlit
+NumPy
+Pandas
+Matplotlib
+SQLite
+Pillow (for uploaded images)
+    """)
+
+    st.subheader("Run Locally")
+
+    st.code("""
+pip install streamlit numpy pandas matplotlib pillow
+streamlit run app.py
+    """)
+
+
+# ==========================================
+# FOOTER
+# ==========================================
+
+st.divider()
+
+st.markdown(
+    """
+    <div style="text-align:center;color:#91a9bd;padding:8px">
+        PRJ-44 · AUV Sonar Intelligence Prototype · Educational Demo
+    </div>
+    """,
+    unsafe_allow_html=True
+)
+```
