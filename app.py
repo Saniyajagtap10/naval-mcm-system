@@ -508,3 +508,214 @@ with tab6:
                            file_name="SQLite_Mission_Logs.csv", mime="text/csv")
     else:
         st.info("No events logged yet. Let the live stream run.")
+
+# ============================================================
+# NEW MODULE: RISK-AND-ENERGY AWARE MISSION INTELLIGENCE
+# ============================================================
+
+st.markdown("---")
+st.header("🧭 Risk-and-Energy Aware Mission Intelligence")
+
+st.markdown("""
+This prototype prioritizes candidate hazards for follow-up sonar scans
+using estimated risk, uncertainty, and scan-energy cost.
+
+Note: The example hazards below are demonstration data. They are not
+live detections from the sonar pipeline.
+""")
+
+# Demonstration hazard candidates
+default_hazards = pd.DataFrame([
+    {"Hazard ID": "H-01", "Risk": 9, "Uncertainty": 0.75, "Scan Energy": 20},
+    {"Hazard ID": "H-02", "Risk": 7, "Uncertainty": 0.35, "Scan Energy": 15},
+    {"Hazard ID": "H-03", "Risk": 5, "Uncertainty": 0.90, "Scan Energy": 30},
+    {"Hazard ID": "H-04", "Risk": 8, "Uncertainty": 0.25, "Scan Energy": 25},
+    {"Hazard ID": "H-05", "Risk": 3, "Uncertainty": 0.40, "Scan Energy": 10},
+])
+
+st.subheader("1. Candidate Hazard Inputs")
+st.caption(
+    "Edit the demonstration values below to test different mission scenarios."
+)
+
+hazards_df = st.data_editor(
+    default_hazards,
+    use_container_width=True,
+    hide_index=True,
+    disabled=["Hazard ID"],
+    column_config={
+        "Risk": st.column_config.NumberColumn(
+            "Risk (1–10)", min_value=1, max_value=10, step=1
+        ),
+        "Uncertainty": st.column_config.NumberColumn(
+            "Uncertainty (0–1)", min_value=0.0, max_value=1.0, step=0.05
+        ),
+        "Scan Energy": st.column_config.NumberColumn(
+            "Scan Energy (units)", min_value=1, step=1
+        ),
+    },
+    key="mission_hazard_editor",
+)
+
+energy_budget = st.slider(
+    "Available scan-energy budget",
+    min_value=10,
+    max_value=100,
+    value=50,
+    step=5,
+    key="mission_energy_budget",
+)
+
+strategy = st.selectbox(
+    "Mission planning strategy",
+    [
+        "Balanced",
+        "Risk-first",
+        "Energy-saving",
+    ],
+    key="mission_planning_strategy",
+)
+
+# Validate inputs
+valid_hazards = hazards_df.copy()
+
+valid_hazards["Risk"] = pd.to_numeric(
+    valid_hazards["Risk"], errors="coerce"
+)
+valid_hazards["Uncertainty"] = pd.to_numeric(
+    valid_hazards["Uncertainty"], errors="coerce"
+)
+valid_hazards["Scan Energy"] = pd.to_numeric(
+    valid_hazards["Scan Energy"], errors="coerce"
+)
+
+valid_hazards = valid_hazards.dropna(
+    subset=["Risk", "Uncertainty", "Scan Energy"]
+)
+
+valid_hazards = valid_hazards[
+    valid_hazards["Risk"].between(1, 10)
+    & valid_hazards["Uncertainty"].between(0, 1)
+    & (valid_hazards["Scan Energy"] > 0)
+]
+
+if valid_hazards.empty:
+    st.warning("Enter at least one valid hazard candidate.")
+else:
+    # Normalize risk and uncertainty to a 0–1 scale.
+    risk_score = valid_hazards["Risk"] / 10.0
+    uncertainty_score = valid_hazards["Uncertainty"]
+
+    if strategy == "Balanced":
+        valid_hazards["Priority Score"] = (
+            0.60 * risk_score + 0.40 * uncertainty_score
+        )
+
+    elif strategy == "Risk-first":
+        valid_hazards["Priority Score"] = (
+            0.80 * risk_score + 0.20 * uncertainty_score
+        )
+
+    else:
+        valid_hazards["Priority Score"] = (
+            0.60 * risk_score + 0.40 * uncertainty_score
+        ) / valid_hazards["Scan Energy"]
+
+    # Greedy energy-constrained selection.
+    # This is a heuristic, not a guaranteed optimal solution.
+    ranked = valid_hazards.sort_values(
+        "Priority Score", ascending=False
+    ).copy()
+
+    selected_ids = []
+    remaining_energy = int(energy_budget)
+
+    for _, hazard in ranked.iterrows():
+        cost = int(hazard["Scan Energy"])
+
+        if cost <= remaining_energy:
+            selected_ids.append(hazard["Hazard ID"])
+            remaining_energy -= cost
+
+    valid_hazards["Recommended Scan"] = valid_hazards[
+        "Hazard ID"
+    ].isin(selected_ids)
+
+    valid_hazards["Priority Score"] = valid_hazards[
+        "Priority Score"
+    ].round(3)
+
+    recommended = valid_hazards[
+        valid_hazards["Recommended Scan"]
+    ].sort_values("Priority Score", ascending=False)
+
+    # Mission summary
+    total_energy = int(energy_budget) - remaining_energy
+
+    m1, m2, m3, m4 = st.columns(4)
+
+    m1.metric(
+        "Candidate Hazards",
+        len(valid_hazards),
+    )
+
+    m2.metric(
+        "Recommended Scans",
+        len(recommended),
+    )
+
+    m3.metric(
+        "Energy Used",
+        f"{total_energy} / {energy_budget}",
+    )
+
+    m4.metric(
+        "Energy Remaining",
+        remaining_energy,
+    )
+
+    st.subheader("2. Recommended Follow-up Scans")
+
+    if recommended.empty:
+        st.info(
+            "No candidate fits the current energy budget. "
+            "Increase the budget or review scan-energy costs."
+        )
+    else:
+        st.dataframe(
+            recommended[
+                [
+                    "Hazard ID",
+                    "Risk",
+                    "Uncertainty",
+                    "Scan Energy",
+                    "Priority Score",
+                ]
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    st.subheader("3. All Candidates and Priority")
+
+    st.dataframe(
+        valid_hazards.sort_values(
+            "Priority Score", ascending=False
+        ),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.download_button(
+        "📥 Export Mission Scan Plan (CSV)",
+        data=valid_hazards.to_csv(index=False).encode("utf-8"),
+        file_name="mission_scan_plan.csv",
+        mime="text/csv",
+        key="download_mission_scan_plan",
+    )
+
+    st.caption(
+        "Research prototype: priorities use a heuristic and demonstration "
+        "inputs. Validate against real sonar detections, mission constraints, "
+        "and measured energy consumption before operational use."
+    )
