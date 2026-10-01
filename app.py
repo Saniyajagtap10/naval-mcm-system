@@ -8,6 +8,7 @@ import plotly.express as px
 import streamlit as st
 
 import saug_core as S
+import rsst  # NEW: Range-Scaling Shadow Test
 
 # --- Page Configuration ---
 st.set_page_config(
@@ -327,6 +328,16 @@ with tab2:
             for rng_m, sh_m, h_m in x["points"]:
                 scat.append({"Range (m)": rng_m, "Shadow length (m)": sh_m, "Type": label})
     st.dataframe(pd.DataFrame(rows_i), use_container_width=True, hide_index=True)
+
+    # NEW: Range-Scaling Shadow Test (RSST) vs old HIS
+    st.markdown("""<div class="novelty-box"><b>NEW — Range-Scaling Shadow Test (RSST):</b> a real object's shadow
+    grows <b>in proportion to range</b> (L = k·R), while a fixed-shape artifact keeps the <b>same shadow length</b>.
+    RSST compares these two models with a log-likelihood ratio and a sequential decision. It needs no altitude,
+    no hand-tuned threshold, and says <b>UNDECIDED</b> when the range did not change enough.</div>""",
+                unsafe_allow_html=True)
+    st.markdown("**RSST (new) vs HIS (old)**")
+    st.dataframe(rsst.rsst_table(trk_inv), use_container_width=True, hide_index=True)
+
     if scat:
         fs = px.scatter(pd.DataFrame(scat), x="Range (m)", y="Shadow length (m)", color="Type", opacity=0.7,
                         color_discrete_map={"Real mines (physical)": "#00b4d8", "Non-physical artifacts": "#ff4d6d"},
