@@ -4,4 +4,4 @@ pandas
 plotly
 pydeck
 matplotlib
-pillow
+Pillow
