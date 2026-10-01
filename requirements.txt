@@ -1,3 +1,4 @@
+```txt
 streamlit
 numpy
 pandas
@@ -5,3 +6,4 @@ plotly
 pydeck
 Pillow
 matplotlib
+```
