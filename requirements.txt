@@ -1,9 +1,7 @@
+```text
 streamlit
-torch
-torchvision
 numpy
-opencv-python-headless
 pandas
-folium
-plotly
-Pillow
+matplotlib
+pillow
+```
