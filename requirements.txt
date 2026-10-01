@@ -1,7 +1,7 @@
-```text
 streamlit
 numpy
 pandas
+plotly
+pydeck
 matplotlib
 pillow
-```
