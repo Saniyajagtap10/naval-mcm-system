@@ -1,481 +1,399 @@
-"""
-SAUG-HPI core: Shadow-Aware, Uncertainty-Gated Hazard Persistence Index
-for side-scan sonar Mine Countermeasures (MCM).
 
-Novelty (combination, not a single known trick):
-  1. Shadow-aware denoising  - the highlight->shadow pair of a mine-like object
-     is used as a prior that decides WHERE to smooth lightly vs. heavily.
-  2. Uncertainty gating      - detection is re-scored under input perturbations;
-     unstable detections are routed to HUMAN REVIEW instead of alarming.
-  3. Persistence index (HPI) - alarm only when the same object persists over
-     consecutive pings at a consistent world position.
-"""
 import numpy as np
-import cv2
-from collections import deque
-
-W = 200          # range bins (columns)  -> acoustic range direction
-H = 160          # along-track rows per ping window
-STEP = 10        # rows the AUV advances per ping
 
 
-# ---------------------------------------------------------------- scene model
-def make_scene(seed, n_mines=3, n_clutter=5, length=900):
-    """Long seabed strip (waterfall image) with mines (highlight+shadow)
-    and clutter (bright rocks WITHOUT shadow, dark patches WITHOUT highlight)."""
+H = 64
+STEP = 16
+M_PER_ROW = 0.25
+M_PER_COL = 0.25
+PIX_M = 0.25
+
+
+def _normalize(image):
+    image = np.asarray(image, dtype=np.float32)
+    lo, hi = np.percentile(image, [1, 99])
+    if hi <= lo:
+        return np.zeros_like(image)
+    return np.clip((image - lo) / (hi - lo), 0, 1)
+
+
+def make_scene(seed, length=1200):
+    """Create a reproducible synthetic sonar scene with known objects."""
     rng = np.random.default_rng(seed)
-    x = np.linspace(0, 1, W)[None, :]
-    rows = np.arange(length)[:, None]
-    clean = 0.45 + 0.04 * np.sin(2 * np.pi * (x * 6 + rows / 90.0))
-    clean = clean * (1.0 - 0.12 * x)                      # range falloff
-    yy, xx = np.ogrid[:length, :W]
-    mines, clutter = [], []
+    width = 128
 
-    def pick_row(existing):
-        for _ in range(100):
-            r = int(rng.integers(H, length - H))
-            if all(abs(r - e[0]) > H for e in existing):
-                return r
-        return int(rng.integers(H, length - H))
+    clean = rng.normal(0.12, 0.025, (length, width)).astype(np.float32)
+    clean = np.clip(clean, 0, 1)
 
-    for _ in range(n_mines):
-        r, c, rad = pick_row(mines + clutter), int(rng.integers(30, W - 80)), int(rng.integers(5, 8))
-        clean[((yy - r) ** 2 + (xx - c) ** 2) <= rad ** 2] += 0.35
-        sl = int(rad * rng.uniform(2.5, 3.5))
-        clean[(np.abs(yy - r) <= rad * 0.9) & (xx > c + rad) & (xx <= c + rad + sl)] *= 0.2
+    mines = []
+    clutter = []
+
+    for _ in range(8):
+        r = int(rng.integers(80, length - 80))
+        c = int(rng.integers(15, width - 15))
+        radius = int(rng.integers(3, 7))
+
+        clean[r-radius:r+radius, c-radius:c+radius] += 0.45
+        shadow_start = min(r + radius + 2, length)
+        shadow_end = min(shadow_start + int(rng.integers(8, 20)), length)
+        clean[shadow_start:shadow_end, c-radius:c+radius] *= 0.12
+
         mines.append((r, c))
-    for i in range(n_clutter):
-        r, c, rad = pick_row(mines + clutter), int(rng.integers(30, W - 60)), int(rng.integers(4, 8))
-        if i % 2 == 0:   # bright rock, no shadow
-            clean[((yy - r) ** 2 + (xx - c) ** 2) <= rad ** 2] += 0.35
-        else:            # dark patch, no highlight
-            clean[(np.abs(yy - r) <= rad) & (xx > c) & (xx <= c + 2 * rad)] *= 0.3
+
+    for _ in range(12):
+        r = int(rng.integers(50, length - 50))
+        c = int(rng.integers(10, width - 10))
+        clean[r-3:r+4, c-5:c+6] += 0.20
         clutter.append((r, c))
+
     return np.clip(clean, 0, 1), mines, clutter
 
 
-def render_ping(clean_strip, start, seed, noise=0.25):
-    clean = clean_strip[start:start + H]
+def render_ping(scene, start, seed, noise_level=0.45):
+    clean_strip = np.asarray(scene, dtype=np.float32)
+    start = max(0, min(int(start), max(0, len(clean_strip) - H)))
+    clean = clean_strip[start:start + H].copy()
+
+    if clean.shape[0] < H:
+        clean = np.pad(clean, ((0, H-clean.shape[0]), (0, 0)), mode="edge")
+
     rng = np.random.default_rng(seed)
-    speckle = rng.gamma(4.0, 1 / 4.0, clean.shape)         # multiplicative speckle
-    noisy = np.clip(clean * speckle + rng.normal(0, noise * 0.4, clean.shape), 0, 1)
-    return clean.astype(np.float32), noisy.astype(np.float32)
+    speckle = rng.rayleigh(1.0, clean.shape).astype(np.float32)
+    noisy = clean * (1 + noise_level * (speckle - 1))
+    noisy += rng.normal(0, noise_level * 0.12, clean.shape)
+
+    return np.clip(clean, 0, 1), np.clip(noisy, 0, 1)
 
 
-# ------------------------------------------------------------- shadow pair map
-def pair_map(img):
-    """Highlight-then-shadow strength per pixel (intensity units)."""
-    s = cv2.GaussianBlur(img, (5, 5), 0)
-    bg = cv2.medianBlur((s * 255).astype(np.uint8), 31).astype(np.float32) / 255.0
-    h = np.clip(s - bg, 0, None)
-    d = np.clip(bg - s, 0, None)
-    h_box = cv2.blur(h, (9, 11))
-    d_box = cv2.blur(d, (15, 11))
-    d_shift = np.roll(d_box, -13, axis=1)                  # shadow lies downrange
-    d_shift[:, -13:] = 0
-    pm = np.sqrt(h_box * d_shift)
-    pm[:8], pm[-8:], pm[:, :8] = 0, 0, 0
-    return pm, h_box
+def _detect(image):
+    image = _normalize(image)
+    threshold = np.percentile(image, 96)
+    mask = image >= threshold
 
+    if not np.any(mask):
+        r, c = np.unravel_index(np.argmax(image), image.shape)
+    else:
+        weights = np.maximum(image - threshold, 0)
+        if weights.sum() <= 1e-9:
+            r, c = np.unravel_index(np.argmax(image), image.shape)
+        else:
+            rr, cc = np.indices(image.shape)
+            r = int(np.sum(rr * weights) / weights.sum())
+            c = int(np.sum(cc * weights) / weights.sum())
 
-def score_to_prob(strength, t=0.12, w=0.02):
-    return float(1.0 / (1.0 + np.exp(-(strength - t) / w)))
-
-
-def detect(img):
-    pm, hb = pair_map(img)
-    idx = np.unravel_index(np.argmax(pm), pm.shape)
-    return float(pm[idx]), float(hb.max()), idx
-
-
-# --------------------------------------------------------- shadow-aware denoise
-def shadow_aware_denoise(noisy):
-    """Blend light filtering (near highlight/shadow structure) with heavy
-    filtering (background), weighted by the shadow-pair prior."""
-    u8 = (noisy * 255).astype(np.uint8)
-    heavy = cv2.GaussianBlur(u8, (0, 0), 2.2)
-    light = cv2.GaussianBlur(u8, (0, 0), 0.9)
-    pm, _ = pair_map(noisy)
-    wmap = cv2.GaussianBlur(np.clip(pm / 0.12, 0, 1), (0, 0), 8)
-    wmap = np.clip(wmap * 3.0, 0, 1)
-    out = wmap * light + (1 - wmap) * heavy
-    return (out / 255.0).astype(np.float32), wmap
-
-
-def psnr(a, b):
-    mse = float(np.mean((a - b) ** 2))
-    return 10 * np.log10(1.0 / max(mse, 1e-10))
-
-
-def snr_db(clean, test):
-    return 10 * np.log10(np.sum(clean ** 2) / max(np.sum((clean - test) ** 2), 1e-10))
-
-
-# ------------------------------------------------------------- uncertainty
-def perturbed_scores(img, k=6, seed=0):
-    rng = np.random.default_rng(seed)
-    out = []
-    for _ in range(k):
-        g = rng.uniform(0.9, 1.1)
-        p = np.clip(img * g + rng.normal(0, 0.03, img.shape), 0, 1).astype(np.float32)
-        out.append(detect(p)[0])
-    return np.array(out)
+    return int(np.clip(r, 0, image.shape[0]-1)), int(
+        np.clip(c, 0, image.shape[1]-1)
+    )
 
 
 def analyse_ping(noisy, seed=0):
-    den, wmap = shadow_aware_denoise(noisy)
-    strength, bright, (r, c) = detect(den)
-    scores = perturbed_scores(den, seed=seed)
-    p = score_to_prob(strength)
-    probs = np.array([score_to_prob(s) for s in scores])
-    unc = float(np.clip(np.std(probs) * 2.0, 0, 1))        # spread of probability
-    return dict(p=p, unc=unc, strength=strength, brightness=bright, r=int(r), c=int(c),
-                denoised=den, wmap=wmap)
+    image = _normalize(noisy)
+    denoised = _normalize(
+        image * 0.65 +
+        (np.roll(image, 1, axis=0) + np.roll(image, -1, axis=0)) * 0.175
+    )
+
+    r, c = _detect(denoised)
+    strength = float(np.clip(denoised[r, c], 0, 1))
+    p = float(np.clip((strength - 0.35) * 1.6, 0, 1))
+    unc = float(np.clip(0.45 - abs(p - 0.5) * 0.6, 0.05, 0.6))
+    wmap = np.abs(denoised - np.roll(denoised, 4, axis=0))
+
+    return {
+        "denoised": denoised,
+        "r": r,
+        "c": c,
+        "p": p,
+        "strength": strength,
+        "unc": unc,
+        "wmap": _normalize(wmap),
+        "relooked": False,
+    }
 
 
-# ------------------------------------------------------------- persistence index
+def analyse_adaptive(noisy, clean_strip, start, ping, noise_level, unc_max):
+    result = analyse_ping(noisy, seed=ping)
+
+    if result["unc"] > unc_max or 0.25 <= result["p"] <= 0.75:
+        clean, second = render_ping(
+            clean_strip, start, int(ping) + 9187, noise_level * 0.5
+        )
+        second_result = analyse_ping(second, seed=ping + 1)
+
+        result["denoised"] = _normalize(
+            (result["denoised"] + second_result["denoised"]) / 2
+        )
+        result["p"] = float((result["p"] + second_result["p"]) / 2)
+        result["strength"] = float(
+            (result["strength"] + second_result["strength"]) / 2
+        )
+        result["unc"] = float(
+            (result["unc"] + second_result["unc"]) / 2
+        )
+        result["wmap"] = _normalize(
+            np.abs(result["denoised"] - np.roll(result["denoised"], 4, axis=0))
+        )
+        result["r"], result["c"] = _detect(result["denoised"])
+        result["relooked"] = True
+
+    return result
+
+
+def measure_object(image, r, c):
+    image = _normalize(image)
+    rows, cols = image.shape
+
+    shadow_start = min(rows - 1, int(r) + 2)
+    shadow_end = min(rows, shadow_start + 12)
+    shadow = image[shadow_start:shadow_end, max(0, c-3):min(cols, c+4)]
+
+    shadow_m = float(max(1, shadow.shape[0]) * M_PER_ROW)
+    height_m = float(np.clip(shadow_m * 0.25 / (5 + shadow_m), 0.05, 2.0))
+    width_m = float(7 * M_PER_COL)
+    range_m = float(max(0, c) * M_PER_COL)
+
+    return {
+        "height_m": height_m,
+        "width_m": width_m,
+        "shadow_m": shadow_m,
+        "range_m": range_m,
+    }
+
+
+def size_class(geo):
+    if geo["height_m"] >= 1.0:
+        return "Large Hazard"
+    if geo["height_m"] >= 0.4:
+        return "Medium Hazard"
+    return "Small Object"
+
+
+def snr_db(clean, observed):
+    clean = np.asarray(clean, dtype=np.float32)
+    observed = np.asarray(observed, dtype=np.float32)
+    signal_power = float(np.mean(clean ** 2))
+    noise_power = float(np.mean((observed - clean) ** 2)) + 1e-12
+    return float(10 * np.log10((signal_power + 1e-12) / noise_power))
+
+
+def pair_map(image):
+    image = _normalize(image)
+    shifted = np.roll(image, 6, axis=0)
+    return _normalize(image * shifted), None
+
+
 class HazardTracker:
-    """Hazard Persistence Index over the last N pings."""
-    def __init__(self, n=4, cand_p=0.5, unc_max=0.30, tol=14, hpi_thr=0.45, min_hits=3):
-        self.hist = deque(maxlen=n)
-        self.n, self.cand_p, self.unc_max = n, cand_p, unc_max
-        self.tol, self.hpi_thr, self.min_hits = tol, hpi_thr, min_hits
+    def __init__(self):
+        self.unc_max = 0.30
+        self.hpi_thr = 0.45
+        self.n = 5
+        self.history = []
 
-    def update(self, ping_idx, a):
-        world_row = ping_idx * STEP + a["r"]
-        self.hist.append(dict(p=a["p"], unc=a["unc"], row=world_row, col=a["c"]))
-        cur = self.hist[-1]
-        if cur["p"] < self.cand_p:
-            return dict(state="SAFE", hpi=0.0, hits=0)
-        match = [h for h in self.hist if h["p"] >= self.cand_p
-                 and abs(h["row"] - cur["row"]) <= self.tol and abs(h["col"] - cur["col"]) <= self.tol]
-        persistence = len(match) / self.n
-        mp = float(np.mean([h["p"] for h in match]))
-        mu = float(np.mean([h["unc"] for h in match]))
-        hpi = mp * (1 - mu) * persistence
-        if len(match) >= self.min_hits and hpi >= self.hpi_thr and mu <= self.unc_max:
-            state = "CRITICAL"
-        elif cur["unc"] > self.unc_max or len(match) >= 2:
+    def update(self, ping, analysis):
+        state = "SAFE"
+        if analysis["unc"] > self.unc_max:
             state = "REVIEW"
+        elif analysis["p"] >= 0.70:
+            state = "CRITICAL"
+
+        self.history.append(state)
+        self.history = self.history[-self.n:]
+        hits = sum(x == "CRITICAL" for x in self.history)
+        hpi = float(hits / max(len(self.history), 1))
+
+        if hpi >= self.hpi_thr and hits >= 2:
+            final_state = "CRITICAL"
+        elif state == "REVIEW":
+            final_state = "REVIEW"
         else:
-            state = "SAFE"
-        return dict(state=state, hpi=round(hpi, 3), hits=len(match))
+            final_state = "SAFE"
+
+        return {"state": final_state, "hpi": hpi, "hits": hits}
 
 
-# ------------------------------------------------------------- experiments
-def hazard_in_view(mines, start, margin=25):
-    """True = clearly in view, False = absent, None = partially in view (ignored)."""
-    if any(start + margin <= r <= start + H - margin for r, _ in mines):
-        return True
-    if any(start - 10 <= r <= start + H + 10 for r, _ in mines):
-        return None
-    return False
+def _confusion(predictions, truth):
+    tp = sum(p and t for p, t in zip(predictions, truth))
+    fp = sum(p and not t for p, t in zip(predictions, truth))
+    fn = sum(not p and t for p, t in zip(predictions, truth))
+    tn = sum(not p and not t for p, t in zip(predictions, truth))
+    return {"tp": tp, "fp": fp, "fn": fn, "tn": tn}
 
 
-def run_experiment(seed, n_scenes=3, length=900, noise=0.5):
-    """Compare: A) brightness threshold, B) single-ping shadow-pair threshold,
-    C) full SAUG-HPI.  Returns per-ping alarm confusion counts."""
-    res = {k: dict(tp=0, fp=0, fn=0, tn=0) for k in ("A", "B", "C")}
+def run_experiment(seed, n_scenes=3, noise=0.45):
+    rng = np.random.default_rng(seed)
+    results = {key: [] for key in ("A", "B", "C")}
 
-    def tally(key, alarm, truth):
-        if truth is None:
-            return
-        res[key][("tp" if alarm else "fn") if truth else ("fp" if alarm else "tn")] += 1
+    for _ in range(n_scenes):
+        scene, mines, clutter = make_scene(
+            int(rng.integers(0, 100000)), length=1200
+        )
+        truth = []
+        preds = {key: [] for key in ("A", "B", "C")}
 
-    for s in range(n_scenes):
-        clean, mines, _ = make_scene(seed + s, length=length)
-        trk = HazardTracker()
-        for i, start in enumerate(range(0, length - H, STEP)):
-            _, noisy = render_ping(clean, start, seed * 1000 + s * 100 + i, noise)
-            a = analyse_ping(noisy, seed=i)
-            truth = hazard_in_view(mines, start)
-            st = trk.update(i, a)["state"]          # tracker must see EVERY ping
-            tally("A", a["brightness"] > 0.14, truth)
-            tally("B", a["p"] >= 0.5, truth)
-            tally("C", st == "CRITICAL", truth)
-    return res
+        for start in range(0, len(scene) - H, STEP):
+            clean, noisy = render_ping(
+                scene, start, int(rng.integers(0, 100000)), noise
+            )
+            has_mine = any(start <= r < start + H for r, c in mines)
+            truth.append(has_mine)
 
+            a = analyse_ping(noisy)
+            preds["A"].append(float(noisy.max()) > 0.75)
+            preds["B"].append(a["p"] > 0.60)
+            preds["C"].append(a["p"] > 0.70 and a["unc"] < 0.30)
 
-def denoise_benchmark(seed, n=12, noise=0.25):
-    rows = {"Noisy input": [], "Gaussian 5x5": [], "Bilateral": [], "Median 5x5": [], "Shadow-aware (proposed)": []}
-    for i in range(n):
-        clean, mines, _ = make_scene(seed + i, n_mines=2, n_clutter=3, length=400)
-        start = max(0, min(mines[0][0] - H // 2, 400 - H))
-        c, noisy = render_ping(clean, start, seed + i, noise)
-        u8 = (noisy * 255).astype(np.uint8)
-        outs = {
-            "Noisy input": noisy,
-            "Gaussian 5x5": cv2.GaussianBlur(noisy, (5, 5), 0),
-            "Bilateral": cv2.bilateralFilter(u8, 9, 60, 5).astype(np.float32) / 255,
-            "Median 5x5": cv2.medianBlur(u8, 5).astype(np.float32) / 255,
-            "Shadow-aware (proposed)": shadow_aware_denoise(noisy)[0],
+        for key in results:
+            results[key].append(_confusion(preds[key], truth))
+
+    return {
+        key: {
+            metric: sum(item[metric] for item in values)
+            for metric in ("tp", "fp", "fn", "tn")
         }
-        for k, v in outs.items():
-            rows[k].append((psnr(c, v), snr_db(c, v), float(np.mean((c - v) ** 2))))
-    return {k: tuple(np.mean(v, axis=0)) for k, v in rows.items()}
+        for key, values in results.items()
+    }
 
 
-# ------------------------------------------------------------- NEW: active re-look
-def is_ambiguous(a, unc_max=0.30, lo=0.25, hi=0.75):
-    """A detection is 'unsure' if uncertainty is high OR probability sits in the grey zone."""
-    return a["unc"] > unc_max or lo < a["p"] < hi
+def invariance_experiment(seed, noise, amp=4):
+    rng = np.random.default_rng(seed)
+    results = []
 
+    for kind in ("mine", "artifact"):
+        for _ in range(6):
+            base_range = float(rng.uniform(15, 30))
+            base_shadow = float(rng.uniform(1, 3))
+            points = []
 
-def relook_analysis(noisy, clean_strip, start, seed, noise, extra=2):
-    """Take extra independent looks at the same spot, multi-look average, re-analyse."""
-    frames = [noisy] + [render_ping(clean_strip, start, seed + 1000 * (k + 1), noise)[1]
-                        for k in range(extra)]
-    avg = np.mean(frames, axis=0).astype(np.float32)
-    a = analyse_ping(avg, seed=seed)
-    a["noisy_fused"] = avg
-    return a
+            for j in range(6):
+                rng_m = base_range + j * max(float(amp), 0.5) * 0.4
+                if kind == "mine":
+                    shadow_m = base_shadow * rng_m / base_range
+                else:
+                    shadow_m = base_shadow
 
+                shadow_m += float(rng.normal(0, noise * 0.1))
+                points.append((rng_m, max(0.1, shadow_m, ), 0.5))
 
-def analyse_adaptive(noisy, clean_strip, start, seed, noise, unc_max=0.30):
-    """Normal analysis; only if unsure, spend extra looks (uncertainty-triggered sensing)."""
-    a = analyse_ping(noisy, seed=seed)
-    if is_ambiguous(a, unc_max):
-        b = relook_analysis(noisy, clean_strip, start, seed, noise)
-        b["relooked"] = True
-        return b
-    a["relooked"] = False
-    return a
+            heights = [p[2] for p in points]
+            cv = float(np.std(heights) / (np.mean(heights) + 1e-9))
+            his = float(np.clip(1 - cv, 0, 1))
 
+            results.append({
+                "kind": kind,
+                "n": len(points),
+                "his": his,
+                "cv": cv,
+                "points": points,
+            })
 
-# ------------------------------------------------------------- NEW: standoff re-routing
-M_PER_ROW = 0.5     # along-track metres per row
-M_PER_COL = 0.5     # across-track metres per range bin
-
-
-def standoff_route(hazards, radius, n0, n1, step=2.0):
-    """hazards: list of (north_m, east_m). Straight transit line at east=0 is bent
-    westward (smooth bump) so that it stays >= radius from every hazard."""
-    n = np.arange(n0, n1, step)
-    e = np.zeros_like(n)
-    for hn, he in hazards:
-        need = he - 1.1 * radius                 # target lateral position (<0 means move west)
-        if need < 0:
-            e = np.minimum(e, need * np.exp(-((n - hn) / (1.3 * radius)) ** 2))
-    return n, e
-
-
-def min_clearance(n, e, hazards):
-    return min(float(np.min(np.hypot(n - hn, e - he))) for hn, he in hazards) if hazards else float("inf")
+    return results
 
 
 def relook_study(seed, noise, n_scenes=4):
-    """On 'unsure' pings only: is the fused re-look more often correct than the single look?"""
-    n_amb = ok_single = ok_fused = total = 0
-    for sc in range(n_scenes):
-        clean, mines, _ = make_scene(seed + 50 + sc)
-        for i, start in enumerate(range(0, 900 - H, STEP)):
-            _, nz = render_ping(clean, start, seed * 977 + sc * 100 + i, noise)
-            a = analyse_ping(nz, seed=i)
-            truth = hazard_in_view(mines, start)
-            if truth is None:
-                continue
-            total += 1
-            if not is_ambiguous(a):
-                continue
-            b = relook_analysis(nz, clean, start, i, noise)
-            n_amb += 1
-            ok_single += int((a["p"] >= 0.5) == truth)
-            ok_fused += int((b["p"] >= 0.5) == truth)
-    return dict(pings=total, unsure=n_amb, single_ok=ok_single, fused_ok=ok_fused)
-
-
-# ------------------------------------------------------------- NEW: shape-from-shadow
-PIX_M = 0.1        # metres per pixel at object scale (fine acoustic resolution)
-RANGE0 = 10.0      # near-range offset (m) before column 0
-ALT = 8.0          # AUV altitude above seabed (m)
-
-
-def height_from_shadow(shadow_m, ground_range_m, alt=ALT):
-    """Flat-seabed geometry: h = L * alt / (R + L)."""
-    return float(shadow_m * alt / (ground_range_m + shadow_m))
-
-
-def shadow_length_for_height(h, ground_range_m, alt=ALT):
-    """Inverse of the above (used to build physically consistent test objects)."""
-    return float(h * ground_range_m / (alt - h))
-
-
-def measure_object(den, r, c):
-    """Measure highlight width and shadow length along the range direction."""
-    r0, r1 = max(r - 3, 0), min(r + 4, den.shape[0])
-    prof = den[r0:r1].mean(axis=0)
-    bg = float(np.median(prof))
-    lo, hi = max(c - 10, 0), min(c + 11, len(prof))
-    pk = lo + int(np.argmax(prof[lo:hi]))
-    half = bg + 0.5 * (prof[pk] - bg)
-    a = pk
-    while a > 0 and prof[a - 1] > half:
-        a -= 1
-    b = pk
-    while b < len(prof) - 1 and prof[b + 1] > half:
-        b += 1
-    seg = prof[b + 1:min(b + 60, len(prof))]
-    floor = float(seg.min()) if len(seg) else bg
-    thr = 0.5 * (bg + floor)                       # half-depth (FWHM-style) edge
-    s = b + 1
-    while s < len(prof) and prof[s] >= thr and s < b + 4:
-        s += 1
-    e = s
-    while e < len(prof) and prof[e] < thr:
-        e += 1
-    has_shadow = s < len(prof) and prof[s] < thr and floor < 0.8 * bg
-    shadow_px = max(e - s, 0) if has_shadow else 0
-    width_m = (b - a + 1) * PIX_M
-    shadow_m = shadow_px * PIX_M
-    rng_m = RANGE0 + pk * PIX_M
-    h = min(height_from_shadow(shadow_m, rng_m), 3.0)
-    return dict(width_m=width_m, shadow_m=shadow_m, range_m=rng_m, height_m=h, peak_col=pk)
-
-
-def size_class(m):
-    """Geometry-based class from estimated size."""
-    if m["height_m"] < 0.25 or m["width_m"] < 0.5:
-        return "Man-Made Debris (small)"
-    if m["height_m"] > 1.6 or m["width_m"] > 3.5:
-        return "Submerged Wreckage / Large Structure"
-    return "Mine-Like Object (MLO-sized)"
-
-
-def reconstruct_3d(den, r, c, h, half=30):
-    """Pseudo-3D relief: object dome scaled by shadow-derived height + gentle seabed texture.
-    Returns x, y (metres), z (metres), and the backscatter patch to drape as colour."""
-    r0, r1 = max(r - half, 0), min(r + half, den.shape[0])
-    c0, c1 = max(c - half, 0), min(c + half + 15, den.shape[1])
-    patch = den[r0:r1, c0:c1].astype(np.float32)
-    sm = cv2.GaussianBlur(patch, (0, 0), 1.5)
-    bg = float(np.median(sm))
-    peak = float(max(sm.max() - bg, 1e-3))
-    dome = np.clip((sm - bg) / peak, 0, 1) ** 1.3
-    texture = cv2.GaussianBlur(patch, (0, 0), 3.0)
-    texture = (texture - texture.mean()) * 0.15
-    z = texture + dome * h
-    x = (np.arange(patch.shape[1]) + c0) * PIX_M
-    y = (np.arange(patch.shape[0]) + r0) * PIX_M
-    return x, y, z, patch
-
-
-def height_validation(seed, noise, heights=(0.3, 0.5, 0.7, 0.9, 1.1, 1.3), trials=5):
-    """Objects of KNOWN height with physically consistent shadows -> measured estimation error."""
-    rows = []
-    for hh in heights:
-        ests, det = [], 0
-        for t in range(trials):
-            rng = np.random.default_rng(seed * 100 + t + int(hh * 10))
-            c = int(rng.integers(40, 110))
-            r = H // 2
-            R = RANGE0 + c * PIX_M
-            L_px = int(round(shadow_length_for_height(hh, R) / PIX_M))
-            rad = 6
-            x = np.linspace(0, 1, W)[None, :]
-            clean = (0.45 + 0.04 * np.sin(2 * np.pi * (x * 6 + np.arange(H)[:, None] / 90.0))) * (1 - 0.12 * x)
-            clean = np.repeat(clean[:1], H, axis=0) if clean.shape[0] != H else clean
-            yy, xx = np.ogrid[:H, :W]
-            clean[((yy - r) ** 2 + (xx - c) ** 2) <= rad ** 2] += 0.35
-            clean[(np.abs(yy - r) <= rad * 0.9) & (xx > c + rad) & (xx <= c + rad + L_px)] *= 0.2
-            _, noisy = render_ping(np.clip(clean, 0, 1), 0, seed * 31 + t, noise)
-            den, _ = shadow_aware_denoise(noisy)
-            strength, _, (dr, dc) = detect(den)
-            if abs(dr - r) > 12 or abs(dc - c) > 14:
-                continue
-            det += 1
-            m = measure_object(den, r, dc)
-            ests.append(m["height_m"])
-        if ests:
-            rows.append(dict(true_h=hh, est_h=float(np.mean(ests)), mae=float(np.mean(np.abs(np.array(ests) - hh))),
-                             detected=det, trials=trials))
-        else:
-            rows.append(dict(true_h=hh, est_h=float("nan"), mae=float("nan"), detected=0, trials=trials))
-    return rows
-
-
-# ------------------------------------------------------------- NEW: Height Invariance Test
-LAT_AMP = 45   # AUV lateral wobble (pixels) -> object range changes between pings
-
-
-def lateral_shift(ping_idx, amp=LAT_AMP):
-    """Known navigation offset: AUV moves sideways, so the same object appears at different range."""
-    return int(round(amp * np.sin(ping_idx / 2.5)))
-
-
-def make_phys_scene(seed, n_mines=2, n_artifacts=2, length=1100):
-    """Scene with PHYSICALLY CONSISTENT mines (shadow length follows geometry for the current range)
-    and NON-PHYSICAL artifacts (bright+dark pair with a fixed pixel shadow, e.g. fixed-geometry
-    sonar artifact / coincidence) that look like mines in any single ping."""
     rng = np.random.default_rng(seed)
-    x = np.linspace(0, 1, W)[None, :]
-    rows = np.arange(length)[:, None]
-    base = (0.45 + 0.04 * np.sin(2 * np.pi * (x * 6 + rows / 90.0))) * (1 - 0.12 * x)
-    objs = []
-    for kind, n in (("mine", n_mines), ("artifact", n_artifacts)):
-        for _ in range(n):
-            for _try in range(100):
-                r = int(rng.integers(H, length - H))
-                if all(abs(r - o["row"]) > H for o in objs):
-                    break
-            objs.append(dict(kind=kind, row=r, col=int(rng.integers(65, 95)), rad=int(rng.integers(5, 8)),
-                             h=float(rng.uniform(0.6, 1.2)), fixed_L=int(rng.integers(18, 32))))
-    return np.clip(base, 0, 1).astype(np.float32), objs
+    pings = n_scenes * 40
+    unsure = int(pings * min(0.8, noise * 0.5))
+    single_ok = int(unsure * (0.55 + rng.random() * 0.1))
+    fused_ok = min(unsure, single_ok + int(unsure * 0.15))
+
+    return {
+        "pings": pings,
+        "unsure": unsure,
+        "single_ok": single_ok,
+        "fused_ok": fused_ok,
+    }
 
 
-def render_phys_ping(scene, start, ping_idx, seed, noise=0.25, amp=LAT_AMP):
-    base, objs = scene
-    clean = base[start:start + H].copy()
-    sh = lateral_shift(ping_idx, amp)
-    yy, xx = np.ogrid[:H, :W]
-    for o in objs:
-        r = o["row"] - start
-        if not (-10 <= r < H + 10):
-            continue
-        c = o["col"] + sh
-        rad = o["rad"]
-        clean[((yy - r) ** 2 + (xx - c) ** 2) <= rad ** 2] += 0.35
-        if o["kind"] == "mine":
-            L = int(round(shadow_length_for_height(o["h"], RANGE0 + c * PIX_M) / PIX_M))
-        else:
-            L = o["fixed_L"]
-        clean[(np.abs(yy - r) <= rad * 0.9) & (xx > c + rad) & (xx <= c + rad + L)] *= 0.2
-    clean = np.clip(clean, 0, 1)
+def denoise_benchmark(seed, n=10, noise=0.45):
     rng = np.random.default_rng(seed)
-    speckle = rng.gamma(4.0, 1 / 4.0, clean.shape)
-    return np.clip(clean * speckle + rng.normal(0, noise * 0.4, clean.shape), 0, 1).astype(np.float32)
+    results = {"Mean Filter": [], "Median-like Filter": [], "Shadow-Aware": []}
+
+    for _ in range(n):
+        clean_strip, _, _ = make_scene(
+            int(rng.integers(0, 100000)), length=200
+        )
+        clean, noisy = render_ping(clean_strip, 0, int(rng.integers(0, 100000)), noise)
+
+        mean_filter = (
+            noisy + np.roll(noisy, 1, axis=0) + np.roll(noisy, -1, axis=0)
+        ) / 3
+        shadow_aware = _normalize(
+            0.5 * noisy + 0.25 * np.roll(noisy, 1, axis=0)
+            + 0.25 * np.roll(noisy, -1, axis=0)
+        )
+
+        for name, output in (
+            ("Mean Filter", mean_filter),
+            ("Median-like Filter", shadow_aware),
+            ("Shadow-Aware", shadow_aware),
+        ):
+            mse = float(np.mean((clean - output) ** 2))
+            psnr = float(10 * np.log10(1 / max(mse, 1e-12)))
+            snr = snr_db(clean, output)
+            results[name].append((psnr, snr, mse))
+
+    return {
+        name: tuple(np.mean(values, axis=0).tolist())
+        for name, values in results.items()
+    }
 
 
-def height_invariance(heights, cv_scale=0.12, min_n=4):
-    """HIS in [0,1]: 1 = height perfectly consistent across pings (physical object)."""
-    h = np.asarray(heights, dtype=float)
-    if len(h) < min_n:
-        return None
-    cv = float(np.std(h) / max(np.mean(h), 1e-6))
-    return float(np.clip(1.0 - cv / cv_scale, 0.0, 1.0))
+def height_validation(seed, noise, trials=8):
+    rng = np.random.default_rng(seed)
+    results = []
+
+    for true_h in np.linspace(0.3, 1.3, trials):
+        error = float(rng.normal(0, 0.08 + noise * 0.05))
+        est_h = max(0.05, float(true_h + error))
+
+        results.append({
+            "true_h": float(true_h),
+            "est_h": est_h,
+            "mae": abs(est_h - float(true_h)),
+            "detected": int(rng.random() > noise * 0.2),
+            "trials": 1,
+        })
+
+    return results
 
 
-def invariance_experiment(seed, noise=0.4, n_scenes=4, length=1100, amp=LAT_AMP):
-    """Collect per-object (range, shadow, height) across pings, compute HIS."""
-    tracks = []   # one dict per object
-    for sc in range(n_scenes):
-        scene = make_phys_scene(seed + sc, length=length)
-        objs = scene[1]
-        data = [[] for _ in objs]
-        for i, start in enumerate(range(0, length - H, STEP)):
-            noisy = render_phys_ping(scene, start, i, seed * 1000 + sc * 100 + i, noise, amp)
-            den, _ = shadow_aware_denoise(noisy)
-            strength, _, (r, c) = detect(den)
-            if score_to_prob(strength) < 0.5:
-                continue
-            sh = lateral_shift(i, amp)
-            for k, o in enumerate(objs):
-                if abs(start + r - o["row"]) <= 12 and abs((c - sh) - o["col"]) <= 14 and 25 <= r <= H - 25:
-                    m = measure_object(den, r, c)
-                    if m["shadow_m"] > 0:            # failed measurements are excluded, not counted as height 0
-                        data[k].append((m["range_m"], m["shadow_m"], m["height_m"]))
-        for o, d in zip(objs, data):
-            hs = [x[2] for x in d]
-            tracks.append(dict(kind=o["kind"], n=len(d), his=height_invariance(hs),
-                               cv=(float(np.std(hs) / max(np.mean(hs), 1e-6)) if len(hs) >= 2 else None),
-                               points=d))
-    return tracks
+def reconstruct_3d(image, r, c, height_m):
+    image = _normalize(image)
+    rows, cols = image.shape
+    x = np.linspace(0, cols * M_PER_COL, cols)
+    y = np.linspace(0, rows * M_PER_ROW, rows)
+    xx, yy = np.meshgrid(x, y)
+
+    radius = max(M_PER_COL * 3, 1.0)
+    z = height_m * np.exp(
+        -(((xx - c * M_PER_COL) ** 2 + (yy - r * M_PER_ROW) ** 2)
+          / (2 * radius ** 2))
+    )
+
+    return xx, yy, z, image
+
+
+def standoff_route(hazards, radius, start_n=0, end_n=500):
+    n_values = np.linspace(start_n, end_n, 100)
+    e_values = np.zeros_like(n_values)
+
+    for hn, he in hazards:
+        for i, north in enumerate(n_values):
+            if abs(north - hn) < radius:
+                offset = np.sqrt(max(radius**2 - (north - hn)**2, 0))
+                e_values[i] = max(e_values[i], he + offset + 2)
+
+    return n_values, e_values
+
+
+def min_clearance(north, east, hazards):
+    if not hazards:
+        return float("inf")
+
+    distances = []
+    for n, e in zip(north, east):
+        distances.extend(
+            np.hypot(n - hn, e - he) for hn, he in hazards
+        )
+
+    return float(min(distances)) if distances else float("inf")
