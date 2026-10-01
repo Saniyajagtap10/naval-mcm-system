@@ -3,5 +3,5 @@ numpy
 pandas
 plotly
 pydeck
-matplotlib
 Pillow
+matplotlib
