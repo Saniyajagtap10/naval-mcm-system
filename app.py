@@ -175,7 +175,9 @@ def auv_position(ping_idx):
 
 
 auv_lat, auv_lon = auv_position(st.session_state.ping_idx)
-auv_depth = round(-45.0 + 1.5 * np.sin(st.session_state.ping_idx / 5.0), 1)
+auv_depth = round(
+    -45.0 + 1.5 * np.sin(st.session_state.ping_idx / 5.0), 1
+)
 
 st.title("⚡ PRJ-44: AUV Side-Scan Sonar Hazard Classification Engine")
 st.markdown(
@@ -184,7 +186,7 @@ st.markdown(
 )
 st.markdown("---")
 
-tab1, tab2, tab_twin, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+tab1, tab2, tab_twin, tab3, tab4, tab5, tab6, tab_escc = st.tabs([
     "🔴 Live Telemetry & Stream",
     "🧪 SAUG-HPI Novelty Study",
     "🧊 3D Hazard Digital Twin",
@@ -195,7 +197,26 @@ tab1, tab2, tab_twin, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "🔬 ESCC Novelty Lab",
 ])
 
+
+# =========================================================
 # TAB 1: LIVE STREAM
+# =========================================================
+
+@st.cache_data(show_spinner=False)
+def cached_experiment(seed, noise):
+    return S.run_experiment(seed, n_scenes=3, noise=noise)
+
+
+@st.cache_data(show_spinner=False)
+def cached_invariance(seed, noise, amp):
+    return S.invariance_experiment(seed, noise, amp=amp)
+
+
+@st.cache_data(show_spinner=False)
+def cached_relook(seed, noise):
+    return S.relook_study(seed, noise, n_scenes=4)
+
+
 with tab1:
     @st.fragment(run_every=2 if live_stream_toggle else None)
     def live_stream():
@@ -286,7 +307,6 @@ with tab1:
             f"{res['hits']}/{tracker.n} pings agree",
         )
 
-        st.markdown("---")
         left, right = st.columns(2)
 
         with left:
@@ -301,7 +321,7 @@ with tab1:
                     np.hypot(hn - h["n"], he - h["e"]) > 20
                     for h in ss.hazards
                 ):
-                    ss.hazards.append(dict(n=hn, e=he))
+                    ss.hazards.append({"n": hn, "e": he})
 
                 hlat = ss.auv_lat0 + hn * DEG_PER_M
                 hlon = ss.auv_lon0 + he / (
@@ -312,15 +332,15 @@ with tab1:
                 if live_stream_toggle and (
                     tw is None or tw["p"] <= a["p"] or not tw["critical"]
                 ):
-                    ss.twin = dict(
-                        den=a["denoised"],
-                        r=a["r"],
-                        c=a["c"],
-                        geo=geo,
-                        p=a["p"],
-                        ping=i,
-                        critical=True,
-                    )
+                    ss.twin = {
+                        "den": a["denoised"],
+                        "r": a["r"],
+                        "c": a["c"],
+                        "geo": geo,
+                        "p": a["p"],
+                        "ping": i,
+                        "critical": True,
+                    }
 
                 st.markdown(
                     f"""<div class="flash-alert">
@@ -390,7 +410,7 @@ with tab1:
                 pm,
                 color_continuous_scale="Magma",
                 aspect="auto",
-                labels=dict(color="Pair strength"),
+                labels={"color": "Pair strength"},
             )
             fig.update_layout(
                 margin=dict(t=10, b=10, l=10, r=10),
@@ -400,58 +420,46 @@ with tab1:
 
         tw = ss.get("twin")
         if live_stream_toggle and a["p"] >= 0.5 and tw is None:
-            ss.twin = dict(
-                den=a["denoised"],
-                r=a["r"],
-                c=a["c"],
-                geo=geo,
-                p=a["p"],
-                ping=i,
-                critical=False,
-            )
+            ss.twin = {
+                "den": a["denoised"],
+                "r": a["r"],
+                "c": a["c"],
+                "geo": geo,
+                "p": a["p"],
+                "ping": i,
+                "critical": False,
+            }
 
-        ss.last_analysis = dict(
-            noisy=noisy,
-            lat=lat,
-            lon=lon,
-            depth=auv_depth,
-        )
+        ss.last_analysis = {
+            "noisy": noisy,
+            "lat": lat,
+            "lon": lon,
+            "depth": auv_depth,
+        }
 
     live_stream()
 
 
+# =========================================================
 # TAB 2: SAUG-HPI NOVELTY STUDY
-@st.cache_data(show_spinner=False)
-def cached_experiment(seed, noise):
-    return S.run_experiment(seed, n_scenes=3, noise=noise)
-
-
-@st.cache_data(show_spinner=False)
-def cached_invariance(seed, noise, amp):
-    return S.invariance_experiment(seed, noise, amp=amp)
-
-
-@st.cache_data(show_spinner=False)
-def cached_relook(seed, noise):
-    return S.relook_study(seed, noise, n_scenes=4)
-
+# =========================================================
 
 with tab2:
     st.subheader("🧪 SAUG-HPI vs. Baseline Alerting — Measured Experiment")
 
     st.markdown("""
     <div class="novelty-box">
-    <b>Novel contribution.</b> SAUG-HPI combines highlight-to-shadow geometry,
-    uncertainty gating, and persistence over consecutive pings. The results
-    shown here are computed on synthetic scenes and are not real-world
-    validated sonar performance.
+    <b>SAUG-HPI:</b> combines highlight-to-shadow geometry,
+    uncertainty gating, and persistence across consecutive pings.
+    Results are computed on synthetic scenes and are not
+    real-world validated sonar performance.
     </div>
     """, unsafe_allow_html=True)
 
     cA, cB = st.columns([1, 3])
     exp_noise = cA.slider(
-        "Experiment noise level", 0.1, 0.9,
-        float(sea_noise), 0.1, key="exp_noise"
+        "Experiment noise level",
+        0.1, 0.9, float(sea_noise), 0.1, key="exp_noise"
     )
     exp_seed = cA.number_input("Random seed", 1, 9999, 1)
 
@@ -486,6 +494,7 @@ with tab2:
     st.dataframe(df_exp, use_container_width=True, hide_index=True)
 
     g1, g2 = st.columns(2)
+
     with g1:
         fig = px.bar(
             df_exp,
@@ -512,8 +521,10 @@ with tab2:
 
     st.markdown("---")
     st.subheader("🔁 Uncertainty-Triggered Re-Look")
+
     rl_noise = st.slider(
-        "Re-look study noise level", 0.3, 1.2, 1.0, 0.1, key="rl_noise"
+        "Re-look study noise level",
+        0.3, 1.2, 1.0, 0.1, key="rl_noise"
     )
 
     with st.spinner("Running re-look study..."):
@@ -526,7 +537,10 @@ with tab2:
         rl["unsure"],
         f"{100 * rl['unsure'] / max(rl['pings'], 1):.1f}% of pings",
     )
-    r3.metric("Single-look correct", f"{rl['single_ok']}/{max(rl['unsure'], 1)}")
+    r3.metric(
+        "Single-look correct",
+        f"{rl['single_ok']}/{max(rl['unsure'], 1)}",
+    )
     r4.metric(
         "After re-look correct",
         f"{rl['fused_ok']}/{max(rl['unsure'], 1)}",
@@ -537,7 +551,8 @@ with tab2:
     st.subheader("⚖️ Height Invariance Test")
 
     swing = st.slider(
-        "AUV sideways swing (m)", 0.5, 4.5, 4.5, 0.5, key="swing"
+        "AUV sideways swing (m)",
+        0.5, 4.5, 4.5, 0.5, key="swing"
     )
 
     with st.spinner("Running invariance experiment..."):
@@ -548,6 +563,7 @@ with tab2:
         )
 
     rows_i, scat = [], []
+
     for kind, label in (
         ("mine", "Real mines (physical)"),
         ("artifact", "Non-physical artifacts"),
@@ -588,13 +604,16 @@ with tab2:
 
     st.markdown("""
     <div class="novelty-box">
-    <b>Range-Scaling Shadow Test (RSST):</b>
-    compares range-dependent and fixed-length shadow models.
-    It can return an undecided result when the range variation is insufficient.
+    <b>Range-Scaling Shadow Test (RSST):</b> compares
+    range-dependent and fixed-length shadow models.
     </div>
     """, unsafe_allow_html=True)
 
-    st.dataframe(rsst.rsst_table(trk_inv), use_container_width=True, hide_index=True)
+    st.dataframe(
+        rsst.rsst_table(trk_inv),
+        use_container_width=True,
+        hide_index=True,
+    )
 
     if scat:
         fig = px.scatter(
@@ -609,7 +628,10 @@ with tab2:
         st.plotly_chart(fig, use_container_width=True)
 
 
+# =========================================================
 # TAB 3: 3D DIGITAL TWIN
+# =========================================================
+
 @st.cache_data(show_spinner=False)
 def cached_height_val(seed, noise):
     return S.height_validation(seed, noise, trials=8)
@@ -619,18 +641,30 @@ with tab_twin:
     import plotly.graph_objects as go
 
     st.subheader("🧊 3D Hazard Digital Twin — Shape-from-Shadow Reconstruction")
+    st.markdown("""
+    <div class="novelty-box">
+    A tall object blocks sonar and leaves a shadow behind it.
+    Shadow geometry is used to estimate height and build a
+    rotatable pseudo-3D model.
+    </div>
+    """, unsafe_allow_html=True)
+
     twin = st.session_state.get("twin")
 
     if twin is None:
         st.info("No hazard candidate seen yet — let the live stream run.")
     else:
         geometry = twin["geo"]
+
         k1, k2, k3, k4, k5 = st.columns(5)
         k1.metric("Estimated height", f"{geometry['height_m']:.2f} m")
         k2.metric("Width", f"{geometry['width_m']:.1f} m")
         k3.metric("Shadow length", f"{geometry['shadow_m']:.1f} m")
         k4.metric("Range from AUV", f"{geometry['range_m']:.1f} m")
-        k5.metric("Status", "CONFIRMED" if twin["critical"] else "Candidate")
+        k5.metric(
+            "Status",
+            "CONFIRMED" if twin["critical"] else "Candidate"
+        )
 
         st.markdown(
             f"**Geometry-based class:** {geometry['cls']} · "
@@ -643,11 +677,17 @@ with tab_twin:
 
         fig3d = go.Figure(
             go.Surface(
-                x=x, y=y, z=z,
+                x=x,
+                y=y,
+                z=z,
                 surfacecolor=patch,
                 colorscale="Cividis",
                 showscale=False,
-                lighting=dict(ambient=0.55, diffuse=0.8, specular=0.3),
+                lighting=dict(
+                    ambient=0.55,
+                    diffuse=0.8,
+                    specular=0.3,
+                ),
             )
         )
 
@@ -689,13 +729,16 @@ with tab_twin:
             type="line",
             x0=0.3, y0=0.3,
             x1=1.3, y1=1.3,
-            line=dict(dash="dash"),
+            line=dict(dash="dash", color="#aaa"),
         )
         fig.update_layout(**DARK)
         st.plotly_chart(fig, use_container_width=True)
 
 
+# =========================================================
 # TAB 4: DENOISER BENCHMARK
+# =========================================================
+
 @st.cache_data(show_spinner=False)
 def cached_denoise(seed, noise):
     return S.denoise_benchmark(seed, n=10, noise=noise)
@@ -714,6 +757,7 @@ with tab3:
         }
         for name, values in bench.items()
     ])
+
     st.dataframe(df_b, use_container_width=True, hide_index=True)
 
     fig = px.bar(
@@ -727,7 +771,10 @@ with tab3:
     st.plotly_chart(fig, use_container_width=True)
 
 
+# =========================================================
 # TAB 5: FFT
+# =========================================================
+
 with tab4:
     st.subheader("🧠 FFT Spectrum of the Live Range Profile")
     analysis = st.session_state.get("last_analysis")
@@ -752,14 +799,22 @@ with tab4:
         st.plotly_chart(fig, use_container_width=True)
 
 
-# TAB 6: GIS
+# =========================================================
+# TAB 6: GIS — FIXED ROUTE RETURN VALUES
+# =========================================================
+
 with tab5:
-    st.subheader("🗺️ AUV Mission Track · Hazard Zones · Detour")
+    st.subheader("🗺️ AUV Mission Track · Hazard Zones · Auto Standoff Detour")
+
     track = st.session_state.track
     hazards = st.session_state.hazards
 
     if track:
-        df_track = pd.DataFrame(track, columns=["lat", "lon", "state"])
+        df_track = pd.DataFrame(
+            track,
+            columns=["lat", "lon", "state"],
+        )
+
         colors = {
             "SAFE": [0, 212, 255, 200],
             "REVIEW": [255, 183, 3, 230],
@@ -798,17 +853,30 @@ with tab5:
         route_info = None
 
         if hazards:
-            hazard_list = [(item["n"], item["e"]) for item in hazards]
-            route_n, route_e, clearance = S.standoff_route(
+            hazard_list = [(h["n"], h["e"]) for h in hazards]
+
+            # FIX: standoff_route returns TWO values, not three.
+            route_n, route_e = S.standoff_route(
                 hazard_list, standoff_r, 0, north_end
             )
+
+            route_n = np.asarray(route_n, dtype=float)
+            route_e = np.asarray(route_e, dtype=float)
+
+            # Clearance is calculated separately by saug_core.
+            clearance = S.min_clearance(
+                route_n, route_e, hazard_list
+            )
+
             route_info = (route_n, route_e, clearance)
 
             df_hazards = pd.DataFrame({
-                "lat": [lat0 + item["n"] * DEG_PER_M for item in hazards],
+                "lat": [
+                    lat0 + h["n"] * DEG_PER_M for h in hazards
+                ],
                 "lon": [
-                    lon0 + item["e"] / meters_per_lon_degree
-                    for item in hazards
+                    lon0 + h["e"] / meters_per_lon_degree
+                    for h in hazards
                 ],
             })
 
@@ -816,6 +884,7 @@ with tab5:
                 [lon0, lat0 + north * DEG_PER_M]
                 for north in (0, north_end)
             ]
+
             detour = [
                 [
                     lon0 + east / meters_per_lon_degree,
@@ -824,7 +893,7 @@ with tab5:
                 for north, east in zip(route_n, route_e)
             ]
 
-            layers.extend([
+            layers += [
                 pdk.Layer(
                     "ScatterplotLayer",
                     data=df_hazards,
@@ -856,7 +925,7 @@ with tab5:
                     get_color=[80, 255, 140],
                     width_min_pixels=4,
                 ),
-            ])
+            ]
 
         st.pydeck_chart(pdk.Deck(
             map_style="dark",
@@ -869,34 +938,73 @@ with tab5:
             layers=layers,
         ))
 
+        st.caption(
+            "Cyan = surveyed track · Red zone = confirmed hazard + "
+            "standoff radius · Grey = original transit line · "
+            "Green = computed detour"
+        )
+
         if route_info:
             route_n, route_e, clearance = route_info
+
             c1, c2, c3 = st.columns(3)
             c1.metric("Hazards mapped", len(hazards))
-            c2.metric("Minimum detour clearance", f"{clearance:.1f} m")
+            c2.metric(
+                "Min. clearance of detour",
+                f"{clearance:.1f} m",
+                f"radius {standoff_r} m",
+            )
+
             extra = float(
-                np.sum(np.hypot(np.diff(route_n), np.diff(route_e)))
+                np.sum(np.hypot(
+                    np.diff(route_n), np.diff(route_e)
+                ))
                 - (route_n[-1] - route_n[0])
             )
-            c3.metric("Extra distance", f"+{extra:.1f} m")
+            c3.metric("Extra distance for safety", f"+{extra:.1f} m")
+
+        else:
+            st.info(
+                "No confirmed hazards yet — the original transit line is safe."
+            )
+
     else:
         st.info("Start the live stream to build the mission track.")
 
 
-# TAB 7: DATABASE
+# =========================================================
+# TAB 7: SQLITE DATABASE
+# =========================================================
+
 with tab6:
     st.subheader("💾 Event-Based SQLite Mission Log")
+    st.markdown(
+        "Rows are written only when the alert state changes, "
+        "so the log is a clean event history."
+    )
+
     rows = db_conn.execute(
         "SELECT * FROM mission_logs ORDER BY id DESC LIMIT 50"
     ).fetchall()
 
     if rows:
-        df_logs = pd.DataFrame(rows, columns=[
-            "ID", "Timestamp", "Latitude", "Longitude", "Depth (m)",
-            "Classification", "Confidence", "SNR (dB)",
-            "Uncertainty", "HPI",
-        ])
+        df_logs = pd.DataFrame(
+            rows,
+            columns=[
+                "ID",
+                "Timestamp",
+                "Latitude",
+                "Longitude",
+                "Depth (m)",
+                "Classification",
+                "Confidence",
+                "SNR (dB)",
+                "Uncertainty",
+                "HPI",
+            ],
+        )
         st.dataframe(df_logs, use_container_width=True)
+
         st.download_button(
             "📥 Export Mission History (CSV)",
             df_logs.to_csv(index=False).encode("utf-8"),
@@ -907,6 +1015,9 @@ with tab6:
         st.info("No events logged yet. Let the live stream run.")
 
 
-# TAB 8: ADDITIVE ESCC NOVELTY MODULE
-with tab7:
+# =========================================================
+# ADDITIVE TAB: ESCC NOVELTY LAB
+# =========================================================
+
+with tab_escc:
     E.render_page()
