@@ -1,31 +1,33 @@
-"""PRJ-44 Range-Scaling Shadow Test utilities."""
+
 import pandas as pd
 
 
-def rsst_table(trk_inv):
-    """Convert range-scaling experiment results into a display table."""
-    if isinstance(trk_inv, pd.DataFrame):
-        return trk_inv.copy()
+def rsst_table(tracks):
+    """Convert sonar tracker results into a Streamlit-friendly table."""
+    if tracks is None:
+        return pd.DataFrame()
 
-    if isinstance(trk_inv, dict):
-        # Support either a single result dictionary or named result groups.
-        if not trk_inv:
-            return pd.DataFrame()
+    if isinstance(tracks, pd.DataFrame):
+        return tracks.copy()
 
-        if all(not isinstance(v, (dict, list, tuple)) for v in trk_inv.values()):
-            return pd.DataFrame([trk_inv])
+    if not isinstance(tracks, (list, tuple)):
+        return pd.DataFrame({"Result": [str(tracks)]})
 
-        rows = []
-        for key, value in trk_inv.items():
-            if isinstance(value, dict):
-                rows.append({"Test": key, **value})
-            elif isinstance(value, (list, tuple)):
-                rows.append({"Test": key, "Results": str(value)})
-            else:
-                rows.append({"Test": key, "Results": value})
-        return pd.DataFrame(rows)
+    if not tracks:
+        return pd.DataFrame()
 
-    if isinstance(trk_inv, (list, tuple)):
-        return pd.DataFrame(trk_inv)
+    rows = []
 
-    return pd.DataFrame({"Results": [str(trk_inv)]})
+    for item in tracks:
+        if isinstance(item, dict):
+            rows.append({
+                "Hazard Type": item.get("kind", "Unknown"),
+                "Observations": item.get("n", 0),
+                "History": str(item.get("his", "")),
+                "Confidence": item.get("cv", None),
+                "Points": str(item.get("points", "")),
+            })
+        else:
+            rows.append({"Result": str(item)})
+
+    return pd.DataFrame(rows)
