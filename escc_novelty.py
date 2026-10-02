@@ -125,54 +125,77 @@ def render_page():
         key="escc_pixel",
     )
 
-    if upload is None:
-        st.info("Upload a sonar image to calculate the ESCC score.")
-        return
+    live = st.checkbox(
+        "🔴 Analyse the live sonar ping automatically (every 2 s)",
+        value=True,
+        key="escc_live",
+    )
 
-    try:
-        image = Image.open(upload).convert("RGB")
+    @st.fragment(run_every=2 if live else None)
+    def result_view():
+        image = None
+        source = ""
+        if live and st.session_state.get("last_analysis") is not None:
+            noisy = st.session_state.last_analysis["noisy"]
+            image = Image.fromarray(
+                (np.clip(noisy, 0, 1) * 255).astype(np.uint8)
+            ).convert("RGB")
+            source = "Live sonar ping"
+        elif upload is not None:
+            image = Image.open(upload).convert("RGB")
+            source = "Input sonar image"
 
-        result = analyze_escc(image, height, angle, pixel)
-
-        left, right = st.columns(2)
-
-        with left:
-            st.image(image, caption="Input sonar image", width="stretch")
-
-        with right:
-            st.metric(
-                "ESCC Consistency Score",
-                f"{result['consistency_score']:.3f}",
+        if image is None:
+            st.info(
+                "Upload a sonar image, or keep the live stream running, "
+                "to calculate the ESCC score."
             )
-            st.metric(
-                "Observed Dark-Region Estimate",
-                f"{result['observed_shadow_m']:.2f} m",
+            return
+
+        try:
+            result = analyze_escc(image, height, angle, pixel)
+
+            left, right = st.columns(2)
+
+            with left:
+                st.image(image, caption=source, width="stretch")
+
+            with right:
+                st.metric(
+                    "ESCC Consistency Score",
+                    f"{result['consistency_score']:.3f}",
+                )
+                st.metric(
+                    "Observed Dark-Region Estimate",
+                    f"{result['observed_shadow_m']:.2f} m",
+                )
+                st.metric(
+                    "Expected Shadow Length",
+                    f"{result['expected_shadow_m']:.2f} m",
+                )
+
+                if result["status"] == "CONSISTENT":
+                    st.success("Consistent under the selected assumptions.")
+                else:
+                    st.warning("Mismatch detected — human review recommended.")
+
+            fig, ax = plt.subplots(figsize=(9, 2.5))
+            ax.plot(result["profile"])
+            ax.set_title("Mean Acoustic Intensity Profile")
+            ax.set_xlabel("Range Pixel")
+            ax.set_ylabel("Normalized Intensity")
+            ax.grid(alpha=0.25)
+
+            st.pyplot(fig)
+            plt.close(fig)
+
+            st.caption(
+                "This score measures agreement with user-selected "
+                "assumptions. It is not the probability that an "
+                "object is a mine or hazard."
             )
-            st.metric(
-                "Expected Shadow Length",
-                f"{result['expected_shadow_m']:.2f} m",
-            )
 
-            if result["status"] == "CONSISTENT":
-                st.success("Consistent under the selected assumptions.")
-            else:
-                st.warning("Mismatch detected — human review recommended.")
+        except Exception as exc:
+            st.error(f"Could not analyze this image: {exc}")
 
-        fig, ax = plt.subplots(figsize=(9, 2.5))
-        ax.plot(result["profile"])
-        ax.set_title("Mean Acoustic Intensity Profile")
-        ax.set_xlabel("Range Pixel")
-        ax.set_ylabel("Normalized Intensity")
-        ax.grid(alpha=0.25)
-
-        st.pyplot(fig)
-        plt.close(fig)
-
-        st.caption(
-            "This score measures agreement with user-selected "
-            "assumptions. It is not the probability that an "
-            "object is a mine or hazard."
-        )
-
-    except Exception as exc:
-        st.error(f"Could not analyze this image: {exc}")
+    result_view()
