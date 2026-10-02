@@ -1,5 +1,8 @@
 import numpy as np
 import streamlit as st
+import matplotlib
+
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from PIL import Image
 
@@ -31,16 +34,11 @@ def analyze_escc(
     if arr.size == 0:
         raise ValueError("Image is empty.")
 
-    arr = (
-        (arr - arr.min())
-        / (np.ptp(arr) + 1e-9)
-    )
+    arr = (arr - arr.min()) / (np.ptp(arr) + 1e-9)
 
     profile = np.mean(arr, axis=0)
 
-    threshold = float(
-        np.quantile(profile, shadow_threshold)
-    )
+    threshold = float(np.quantile(profile, shadow_threshold))
 
     dark = profile <= threshold
 
@@ -65,13 +63,9 @@ def analyze_escc(
 
     observed_m = observed_px * pixel_size_m
 
-    angle = np.deg2rad(
-        np.clip(grazing_angle_deg, 1, 89)
-    )
+    angle = np.deg2rad(np.clip(grazing_angle_deg, 1, 89))
 
-    expected_m = (
-        target_height_m / np.tan(angle)
-    )
+    expected_m = target_height_m / np.tan(angle)
 
     score = float(
         np.exp(
@@ -84,20 +78,14 @@ def analyze_escc(
         "observed_shadow_m": observed_m,
         "expected_shadow_m": float(expected_m),
         "consistency_score": score,
-        "status": (
-            "CONSISTENT"
-            if score >= 0.65
-            else "REVIEW REQUIRED"
-        ),
+        "status": "CONSISTENT" if score >= 0.65 else "REVIEW REQUIRED",
         "profile": profile,
         "dark_mask": dark,
     }
 
 
 def render_page():
-    st.subheader(
-        "🔬 ESCC — Echo–Shadow Counterfactual Consistency"
-    )
+    st.subheader("🔬 ESCC — Echo–Shadow Counterfactual Consistency")
 
     st.markdown("""
     ESCC compares an observed dark-region estimate with a
@@ -121,21 +109,11 @@ def render_page():
     c1, c2, c3 = st.columns(3)
 
     height = c1.slider(
-        "Assumed target height (m)",
-        0.1,
-        3.0,
-        0.5,
-        0.1,
-        key="escc_height",
+        "Assumed target height (m)", 0.1, 3.0, 0.5, 0.1, key="escc_height"
     )
 
     angle = c2.slider(
-        "Grazing angle (degrees)",
-        5.0,
-        70.0,
-        25.0,
-        1.0,
-        key="escc_angle",
+        "Grazing angle (degrees)", 5.0, 70.0, 25.0, 1.0, key="escc_angle"
     )
 
     pixel = c3.number_input(
@@ -148,57 +126,39 @@ def render_page():
     )
 
     if upload is None:
-        st.info(
-            "Upload a sonar image to calculate the ESCC score."
-        )
+        st.info("Upload a sonar image to calculate the ESCC score.")
         return
 
     try:
         image = Image.open(upload).convert("RGB")
 
-        result = analyze_escc(
-            image,
-            height,
-            angle,
-            pixel,
-        )
+        result = analyze_escc(image, height, angle, pixel)
 
         left, right = st.columns(2)
 
         with left:
-            st.image(
-                image,
-                caption="Input sonar image",
-                use_container_width=True,
-            )
+            st.image(image, caption="Input sonar image", width="stretch")
 
         with right:
             st.metric(
                 "ESCC Consistency Score",
                 f"{result['consistency_score']:.3f}",
             )
-
             st.metric(
                 "Observed Dark-Region Estimate",
                 f"{result['observed_shadow_m']:.2f} m",
             )
-
             st.metric(
                 "Expected Shadow Length",
                 f"{result['expected_shadow_m']:.2f} m",
             )
 
             if result["status"] == "CONSISTENT":
-                st.success(
-                    "Consistent under the selected assumptions."
-                )
+                st.success("Consistent under the selected assumptions.")
             else:
-                st.warning(
-                    "Mismatch detected — human review recommended."
-                )
+                st.warning("Mismatch detected — human review recommended.")
 
         fig, ax = plt.subplots(figsize=(9, 2.5))
-
         ax.plot(result["profile"])
         ax.set_title("Mean Acoustic Intensity Profile")
         ax.set_xlabel("Range Pixel")
@@ -215,6 +175,4 @@ def render_page():
         )
 
     except Exception as exc:
-        st.error(
-            f"Could not analyze this image: {exc}"
-        )
+        st.error(f"Could not analyze this image: {exc}")
