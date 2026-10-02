@@ -528,6 +528,20 @@ with tab_twin:
 
 
 # ======================================== TAB 4 — DENOISER BENCHMARKS
+def _psnr(a, b):
+    mse = float(np.mean((a - b) ** 2))
+    return 10 * np.log10(1.0 / max(mse, 1e-10))
+
+
+def proposed_denoise(noisy, ping_idx):
+    """Shadow-aware denoiser; works with any saug_core version."""
+    fn = getattr(S, "shadow_aware_denoise", None)
+    if fn is not None:
+        out = fn(noisy)
+        return out[0] if isinstance(out, tuple) else out
+    return S.analyse_ping(noisy, seed=ping_idx)["denoised"]
+
+
 with tab3:
 
     @st.fragment(run_every=REFRESH)
@@ -550,10 +564,10 @@ with tab3:
             "Gaussian 5x5": cv2.GaussianBlur(noisy, (5, 5), 0),
             "Bilateral": cv2.bilateralFilter(u8, 9, 60, 5).astype(np.float32) / 255,
             "Median 5x5": cv2.medianBlur(u8, 5).astype(np.float32) / 255,
-            "Shadow-aware (proposed)": S.shadow_aware_denoise(noisy)[0],
+            "Shadow-aware (proposed)": proposed_denoise(noisy, i),
         }
 
-        scores = {k: (S.psnr(clean, v), S.snr_db(clean, v),
+        scores = {k: (_psnr(clean, v), S.snr_db(clean, v),
                       float(np.mean((clean - v) ** 2))) for k, v in outs.items()}
 
         # running average over all pings seen in this mission
