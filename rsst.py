@@ -1,75 +1,49 @@
+"""
+RSST - Range-Scaling Shadow Test (add-on for saug_core.py)
 
+Idea (flat seabed):  h = L*alt / (R + L)   =>   L = k * R,  k = h / (alt - h)
+  * REAL object      : shadow length L grows in proportion to range R (line through origin).
+  * FIXED artifact   : shadow length L stays constant whatever R is (flat line).
+Two one-parameter models are compared with a log-likelihood ratio (LLR) and decided with
+Wald's sequential thresholds. No altitude needed, no hand-tuned cv threshold, and if the
+range did not change enough the answer is UNDECIDED (instead of a wrong guess).
+"""
 import numpy as np
 import pandas as pd
 
+ALPHA = 0.05                                  # target error rate
+WALD_A = float(np.log((1 - ALPHA) / ALPHA))   # ~2.94
 
-def rsst_table(tracks):
-    """Build an RSST summary table from invariance experiment results."""
-    columns = [
-        "Object Type",
-        "Observations",
-        "Height Invariance Score",
-        "Height Variation (CV)",
-        "Range Change (m)",
-        "RSST Decision",
-    ]
 
-    if tracks is None:
-        return pd.DataFrame(columns=columns)
+def range_scaling_llr(points, min_spread_m=1.0, min_n=3):
+    """points: [(range_m, shadow_m, height_m), ...] for ONE tracked object.
+    Returns dict(llr, k, status) with status in PHYSICAL / ARTIFACT / UNDECIDED."""
+    if points is None or len(points) < min_n:
+        return dict(llr=None, k=None, status="UNDECIDED")
+    R = np.array([p[0] for p in points], dtype=float)
+    L = np.array([p[1] for p in points], dtype=float)
+    if np.ptp(R) < min_spread_m:              # range barely changed -> models indistinguishable
+        return dict(llr=0.0, k=None, status="UNDECIDED")
+    k = float(R @ L / (R @ R))                # least-squares slope of L = k*R
+    rss_phys = float(np.sum((L - k * R) ** 2))
+    rss_art = float(np.sum((L - L.mean()) ** 2))
+    llr = 0.5 * len(R) * float(np.log(max(rss_art, 1e-9) / max(rss_phys, 1e-9)))
+    status = "PHYSICAL" if llr > WALD_A else "ARTIFACT" if llr < -WALD_A else "UNDECIDED"
+    return dict(llr=llr, k=k, status=status)
 
-    if isinstance(tracks, pd.DataFrame):
-        return tracks.copy()
 
-    if not isinstance(tracks, (list, tuple)) or len(tracks) == 0:
-        return pd.DataFrame(columns=columns)
-
+def rsst_table(tracks, his_thr=0.5, min_n=4):
+    """Compare old HIS gate vs new RSST on output of saug_core.invariance_experiment()."""
     rows = []
-
-    for item in tracks:
-        if not isinstance(item, dict):
-            continue
-
-        points = item.get("points") or []
-        ranges = []
-        shadows = []
-
-        for point in points:
-            try:
-                if len(point) >= 2:
-                    ranges.append(float(point[0]))
-                    shadows.append(float(point[1]))
-            except (TypeError, ValueError):
-                continue
-
-        range_change = (
-            max(ranges) - min(ranges) if len(ranges) >= 2 else 0.0
-        )
-
-        his = item.get("his")
-        cv = item.get("cv")
-        count = item.get("n", len(points))
-        kind = str(item.get("kind", "unknown"))
-
-        if len(ranges) < 3 or range_change < 1e-6:
-            decision = "UNDECIDED"
-        elif len(shadows) < 3 or np.std(shadows) < 1e-9:
-            decision = "UNDECIDED"
-        else:
-            correlation = np.corrcoef(ranges, shadows)[0, 1]
-            if not np.isfinite(correlation):
-                decision = "UNDECIDED"
-            elif correlation > 0.5:
-                decision = "RANGE-SCALING"
-            else:
-                decision = "FIXED-SHAPE"
-
+    for kind, label in (("mine", "Real mines (physical)"), ("artifact", "Non-physical artifacts")):
+        T = [t for t in tracks if t["kind"] == kind and t["n"] >= min_n]
+        res = [range_scaling_llr(t["points"]) for t in T]
         rows.append({
-            "Object Type": kind,
-            "Observations": count,
-            "Height Invariance Score": his,
-            "Height Variation (CV)": cv,
-            "Range Change (m)": round(range_change, 3),
-            "RSST Decision": decision,
+            "Object type": label,
+            "Objects tracked": len(T),
+            "HIS accepts (old)": sum(1 for t in T if t["his"] is not None and t["his"] >= his_thr),
+            "RSST says PHYSICAL": sum(r["status"] == "PHYSICAL" for r in res),
+            "RSST says ARTIFACT": sum(r["status"] == "ARTIFACT" for r in res),
+            "RSST UNDECIDED": sum(r["status"] == "UNDECIDED" for r in res),
         })
-
-    return pd.DataFrame(rows, columns=columns)
+    return pd.DataFrame(rows)
