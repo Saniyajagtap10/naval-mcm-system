@@ -1,7 +1,6 @@
-streamlit
+streamlit>=1.50
 numpy
+opencv-python-headless
 pandas
 plotly
 pydeck
-Pillow
-matplotlib
