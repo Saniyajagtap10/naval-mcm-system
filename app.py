@@ -3,6 +3,7 @@ import sqlite3
 
 import numpy as np
 import pandas as pd
+import cv2
 import pydeck as pdk
 import plotly.express as px
 import plotly.graph_objects as go
@@ -87,7 +88,7 @@ relook_on = st.sidebar.checkbox("🔁 Uncertainty-triggered re-look", value=True
 if st.sidebar.button("🔄 New Mission Scene"):
     for key in (
         "scene", "ping_idx", "tracker", "last_state", "alerts_raised",
-        "track", "hazards", "relooks", "twin", "last_analysis",
+        "track", "hazards", "relooks", "twin", "last_analysis", "den_hist",
     ):
         st.session_state.pop(key, None)
 
@@ -362,101 +363,114 @@ with tab2:
                              key="exp_noise")
     exp_seed = col_a.number_input("Random seed", 1, 9999, 1)
 
-    with st.spinner("Running synthetic-scene experiment..."):
-        exp_result = cached_experiment(int(exp_seed), float(exp_noise))
+    auto_seed = col_a.checkbox("🔁 Auto-run new random seed (every 15 s)", value=True,
+                               key="auto_seed")
+    if "seed_counter" not in st.session_state:
+        st.session_state.seed_counter = 0
 
-    method_names = {
-        "A": "Brightness threshold baseline",
-        "B": "Single-ping shadow-pair",
-        "C": "SAUG-HPI proposed",
-    }
+    @st.fragment(run_every=15 if auto_seed else None)
+    def novelty_study():
+        if auto_seed:
+            st.session_state.seed_counter += 1
+        seed_eff = int(exp_seed) + (st.session_state.seed_counter if auto_seed else 0)
+        st.caption(f"Scenes generated with seed **{seed_eff}**")
+        with st.spinner("Running synthetic-scene experiment..."):
+            exp_result = cached_experiment(seed_eff, float(exp_noise))
 
-    rows = []
-    for key, v in exp_result.items():
-        positives = v["tp"] + v["fn"]
-        negatives = v["fp"] + v["tn"]
-        precision = v["tp"] / max(v["tp"] + v["fp"], 1)
-        rows.append({
-            "Method": method_names.get(key, key),
-            "Detection rate (%)": round(100 * v["tp"] / max(positives, 1), 1),
-            "False-alarm rate (%)": round(100 * v["fp"] / max(negatives, 1), 1),
-            "Precision (%)": round(100 * precision, 1),
-            "False alarms": v["fp"],
-        })
+        method_names = {
+            "A": "Brightness threshold baseline",
+            "B": "Single-ping shadow-pair",
+            "C": "SAUG-HPI proposed",
+        }
 
-    df_exp = pd.DataFrame(rows)
-    st.dataframe(df_exp, width="stretch", hide_index=True)
+        rows = []
+        for key, v in exp_result.items():
+            positives = v["tp"] + v["fn"]
+            negatives = v["fp"] + v["tn"]
+            precision = v["tp"] / max(v["tp"] + v["fp"], 1)
+            rows.append({
+                "Method": method_names.get(key, key),
+                "Detection rate (%)": round(100 * v["tp"] / max(positives, 1), 1),
+                "False-alarm rate (%)": round(100 * v["fp"] / max(negatives, 1), 1),
+                "Precision (%)": round(100 * precision, 1),
+                "False alarms": v["fp"],
+            })
 
-    chart1, chart2 = st.columns(2)
-    with chart1:
-        fig = px.bar(df_exp, x="Method", y="False-alarm rate (%)",
-                     color="False-alarm rate (%)", color_continuous_scale="Reds",
-                     title="False-alarm rate")
-        fig.update_layout(xaxis_tickangle=-20, **DARK)
-        st.plotly_chart(fig, width="stretch")
-    with chart2:
-        fig = px.bar(df_exp, x="Method", y="Detection rate (%)",
-                     color="Detection rate (%)", color_continuous_scale="Tealgrn",
-                     title="Detection rate")
-        fig.update_layout(xaxis_tickangle=-20, **DARK)
-        st.plotly_chart(fig, width="stretch")
+        df_exp = pd.DataFrame(rows)
+        st.dataframe(df_exp, width="stretch", hide_index=True)
 
-    st.caption("Results are simulation measurements, not validated performance "
-               "on operational sonar data.")
+        chart1, chart2 = st.columns(2)
+        with chart1:
+            fig = px.bar(df_exp, x="Method", y="False-alarm rate (%)",
+                         color="False-alarm rate (%)", color_continuous_scale="Reds",
+                         title="False-alarm rate")
+            fig.update_layout(xaxis_tickangle=-20, **DARK)
+            st.plotly_chart(fig, width="stretch")
+        with chart2:
+            fig = px.bar(df_exp, x="Method", y="Detection rate (%)",
+                         color="Detection rate (%)", color_continuous_scale="Tealgrn",
+                         title="Detection rate")
+            fig.update_layout(xaxis_tickangle=-20, **DARK)
+            st.plotly_chart(fig, width="stretch")
 
-    st.markdown("---")
-    st.subheader("🔁 Uncertainty-Triggered Re-Look")
-    rl_noise = st.slider("Re-look study noise", 0.3, 1.2, 1.0, 0.1, key="rl_noise")
+        st.caption("Results are simulation measurements, not validated performance "
+                   "on operational sonar data.")
 
-    with st.spinner("Running re-look experiment..."):
-        rl = cached_relook(int(exp_seed), float(rl_noise))
+        st.markdown("---")
+        st.subheader("🔁 Uncertainty-Triggered Re-Look")
+        rl_noise = st.slider("Re-look study noise", 0.3, 1.2, 1.0, 0.1, key="rl_noise")
 
-    r1, r2, r3, r4 = st.columns(4)
-    r1.metric("Pings evaluated", rl["pings"])
-    r2.metric("Uncertain pings", rl["unsure"])
-    r3.metric("Single-look correct", f"{rl['single_ok']}/{max(rl['unsure'], 1)}")
-    r4.metric("After re-look correct", f"{rl['fused_ok']}/{max(rl['unsure'], 1)}")
+        with st.spinner("Running re-look experiment..."):
+            rl = cached_relook(seed_eff, float(rl_noise))
 
-    st.markdown("---")
-    st.subheader("⚖️ Height Invariance Test")
-    swing = st.slider("AUV sideways swing (m)", 0.5, 4.5, 4.5, 0.5, key="swing")
+        r1, r2, r3, r4 = st.columns(4)
+        r1.metric("Pings evaluated", rl["pings"])
+        r2.metric("Uncertain pings", rl["unsure"])
+        r3.metric("Single-look correct", f"{rl['single_ok']}/{max(rl['unsure'], 1)}")
+        r4.metric("After re-look correct", f"{rl['fused_ok']}/{max(rl['unsure'], 1)}")
 
-    with st.spinner("Running height-invariance experiment..."):
-        track_invariance = cached_invariance(
-            int(exp_seed), float(exp_noise), int(round(swing / S.PIX_M))
-        )
+        st.markdown("---")
+        st.subheader("⚖️ Height Invariance Test")
+        swing = st.slider("AUV sideways swing (m)", 0.5, 4.5, 4.5, 0.5, key="swing")
 
-    rows_his, scatter_data = [], []
-    for kind, label in (("mine", "Simulated real mines"),
-                        ("artifact", "Simulated artifacts")):
-        tracks = [t for t in track_invariance if t["kind"] == kind and t["n"] >= 4]
-        accepted = [t for t in tracks if t["his"] is not None and t["his"] >= 0.5]
-        rows_his.append({
-            "Object type": label,
-            "Objects tracked": len(tracks),
-            "Accepted after HIS gate": len(accepted),
-            "Mean height variation (CV)": round(
-                float(np.mean([t["cv"] for t in tracks])), 3
-            ) if tracks else None,
-        })
-        for t in tracks:
-            for range_m, shadow_m, height_m in t["points"]:
-                scatter_data.append({"Range (m)": range_m,
-                                     "Shadow length (m)": shadow_m, "Type": label})
+        with st.spinner("Running height-invariance experiment..."):
+            track_invariance = cached_invariance(
+                seed_eff, float(exp_noise), int(round(swing / S.PIX_M))
+            )
 
-    st.dataframe(pd.DataFrame(rows_his), width="stretch", hide_index=True)
+        rows_his, scatter_data = [], []
+        for kind, label in (("mine", "Simulated real mines"),
+                            ("artifact", "Simulated artifacts")):
+            tracks = [t for t in track_invariance if t["kind"] == kind and t["n"] >= 4]
+            accepted = [t for t in tracks if t["his"] is not None and t["his"] >= 0.5]
+            rows_his.append({
+                "Object type": label,
+                "Objects tracked": len(tracks),
+                "Accepted after HIS gate": len(accepted),
+                "Mean height variation (CV)": round(
+                    float(np.mean([t["cv"] for t in tracks])), 3
+                ) if tracks else None,
+            })
+            for t in tracks:
+                for range_m, shadow_m, height_m in t["points"]:
+                    scatter_data.append({"Range (m)": range_m,
+                                         "Shadow length (m)": shadow_m, "Type": label})
 
-    st.subheader("RSST — Range-Scaling Shadow Test")
-    st.markdown("RSST compares how shadow length changes with range. "
-                "It is a research test using simulated tracks.")
-    st.dataframe(rsst.rsst_table(track_invariance), width="stretch", hide_index=True)
+        st.dataframe(pd.DataFrame(rows_his), width="stretch", hide_index=True)
 
-    if scatter_data:
-        fig = px.scatter(pd.DataFrame(scatter_data), x="Range (m)",
-                         y="Shadow length (m)", color="Type", opacity=0.7,
-                         title="Shadow length versus range")
-        fig.update_layout(**DARK)
-        st.plotly_chart(fig, width="stretch")
+        st.subheader("RSST — Range-Scaling Shadow Test")
+        st.markdown("RSST compares how shadow length changes with range. "
+                    "It is a research test using simulated tracks.")
+        st.dataframe(rsst.rsst_table(track_invariance), width="stretch", hide_index=True)
+
+        if scatter_data:
+            fig = px.scatter(pd.DataFrame(scatter_data), x="Range (m)",
+                             y="Shadow length (m)", color="Type", opacity=0.7,
+                             title="Shadow length versus range")
+            fig.update_layout(**DARK)
+            st.plotly_chart(fig, width="stretch")
+
+    novelty_study()
 
 
 # ============================================ TAB 3 — 3D DIGITAL TWIN
@@ -515,18 +529,72 @@ with tab_twin:
 
 # ======================================== TAB 4 — DENOISER BENCHMARKS
 with tab3:
-    st.subheader("📊 Denoiser Comparison")
-    benchmark = cached_denoiser_benchmark(int(exp_seed), float(exp_noise))
-    df_benchmark = pd.DataFrame([
-        {"Method": n, "PSNR (dB)": round(v[0], 2),
-         "SNR (dB)": round(v[1], 2), "MSE": round(v[2], 4)}
-        for n, v in benchmark.items()
-    ])
-    st.dataframe(df_benchmark, width="stretch", hide_index=True)
-    fig = px.bar(df_benchmark, x="Method", y="PSNR (dB)", color="PSNR (dB)",
-                 color_continuous_scale="Viridis")
-    fig.update_layout(xaxis_tickangle=-20, **DARK)
-    st.plotly_chart(fig, width="stretch")
+
+    @st.fragment(run_every=REFRESH)
+    def denoiser_view():
+        ss = st.session_state
+        st.subheader("📊 Live Denoiser Comparison (current sonar ping)")
+        la = ss.get("last_analysis")
+        if la is None:
+            st.info("Waiting for the first ping...")
+            return
+
+        clean_strip, _, _ = ss.scene
+        max_idx = (clean_strip.shape[0] - S.H) // S.STEP
+        i = min(ss.ping_idx, max_idx)
+        clean, noisy = S.render_ping(clean_strip, i * S.STEP,
+                                     ss.seed * 7919 + i, sea_noise)
+        u8 = (noisy * 255).astype(np.uint8)
+        outs = {
+            "Noisy input": noisy,
+            "Gaussian 5x5": cv2.GaussianBlur(noisy, (5, 5), 0),
+            "Bilateral": cv2.bilateralFilter(u8, 9, 60, 5).astype(np.float32) / 255,
+            "Median 5x5": cv2.medianBlur(u8, 5).astype(np.float32) / 255,
+            "Shadow-aware (proposed)": S.shadow_aware_denoise(noisy)[0],
+        }
+
+        scores = {k: (S.psnr(clean, v), S.snr_db(clean, v),
+                      float(np.mean((clean - v) ** 2))) for k, v in outs.items()}
+
+        # running average over all pings seen in this mission
+        hist = ss.setdefault("den_hist", {"n": 0, "last": -1, "sum": {}})
+        if hist["last"] != i:
+            hist["last"] = i
+            hist["n"] += 1
+            for k, v in scores.items():
+                prev = hist["sum"].get(k, np.zeros(3))
+                hist["sum"][k] = prev + np.array(v)
+
+        cols = st.columns(5)
+        for col, (k, v) in zip(cols, outs.items()):
+            col.image(v, clamp=True, width="stretch", caption=k)
+
+        df_now = pd.DataFrame([
+            {"Method": k,
+             "PSNR now (dB)": round(v[0], 2),
+             "SNR now (dB)": round(v[1], 2),
+             "MSE now": round(v[2], 4),
+             f"PSNR avg ({hist['n']} pings)": round(hist["sum"][k][0] / hist["n"], 2)}
+            for k, v in scores.items()
+        ])
+        st.dataframe(df_now, width="stretch", hide_index=True)
+
+        fig = px.bar(df_now, x="Method", y="PSNR now (dB)", color="PSNR now (dB)",
+                     color_continuous_scale="Viridis")
+        fig.update_layout(xaxis_tickangle=-20, **DARK)
+        st.plotly_chart(fig, width="stretch", key=f"den_{i}_{time.time()}")
+        st.caption(f"Ping #{i}. Computed live on the current simulated ping; "
+                   "the average column accumulates over the mission.")
+
+    denoiser_view()
+
+    with st.expander("Fixed multi-scene benchmark (10 scenes)"):
+        benchmark = cached_denoiser_benchmark(int(exp_seed), float(exp_noise))
+        st.dataframe(pd.DataFrame([
+            {"Method": n, "PSNR (dB)": round(v[0], 2),
+             "SNR (dB)": round(v[1], 2), "MSE": round(v[2], 4)}
+            for n, v in benchmark.items()
+        ]), width="stretch", hide_index=True)
 
 
 # ============================================== TAB 5 — FFT SPECTRUM
