@@ -12,10 +12,10 @@ import matplotlib.pyplot as plt
 from PIL import Image
 from collections import deque
 
-# --- Page Config ---
+# --- Page Config (Fixed: layout instead of page_layout) ---
 st.set_page_config(
     page_title="SAUG-HPI Underwater MCM Dashboard",
-    page_layout="wide",
+    layout="wide",
     initial_sidebar_state="expanded"
 )
 
@@ -201,8 +201,6 @@ def rsst_table(tracks, his_thr=0.5, min_n=4):
         })
     return pd.DataFrame(rows)
 
-
-# Height Invariance helpers for RSST tracks simulation
 LAT_AMP = 45
 PIX_M = 0.1
 RANGE0 = 10.0
@@ -366,7 +364,6 @@ noise_level = st.sidebar.slider("Acoustic Noise Level", 0.1, 1.0, 0.4, 0.05)
 hpi_thr = st.sidebar.slider("HPI Critical Threshold", 0.1, 0.9, 0.45, 0.05)
 unc_max = st.sidebar.slider("Max Uncertainty Gate", 0.1, 0.6, 0.30, 0.05)
 
-# Safe Session State Initialization (No cut-offs)
 if "ping_idx" not in st.session_state:
     st.session_state.ping_idx = 0
 
@@ -380,7 +377,6 @@ if "last_analysis" not in st.session_state:
 
 st.title("🛡️ SAUG-HPI: Underwater Mine Countermeasures")
 
-# Dashboard Tabs
 tab_live, tab_fa, tab_rsst, tab_escc = st.tabs([
     "🔴 Live Sonar Stream", 
     "📊 False Alarm Benchmark", 
@@ -405,7 +401,7 @@ with tab_live:
             
         if st.session_state.last_analysis is not None:
             res_a = st.session_state.last_analysis
-            st.image(res_a["noisy"], caption=f"Live Sonar Ping (Step {st.session_state.ping_idx})", width="stretch")
+            st.image(res_a["noisy"], caption=f"Live Sonar Ping (Step {st.session_state.ping_idx})", use_container_width=True)
         else:
             st.info("Click 'Simulate Next Ping Step' to generate telemetry frames.")
             
@@ -487,7 +483,7 @@ with tab_escc:
             res_escc = analyze_escc(img_to_analyze, height, angle, pixel)
             l_col, r_col = st.columns(2)
             with l_col:
-                st.image(img_to_analyze, caption=source_label, width="stretch")
+                st.image(img_to_analyze, caption=source_label, use_container_width=True)
             with r_col:
                 st.metric("ESCC Consistency Score", f"{res_escc['consistency_score']:.3f}")
                 st.metric("Observed Shadow Estimate", f"{res_escc['observed_shadow_m']:.2f} m")
